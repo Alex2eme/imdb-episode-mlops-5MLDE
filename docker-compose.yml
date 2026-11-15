@@ -109,11 +109,33 @@ services:
       PREFECT_API_URL: http://prefect-server:4200/api
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Échec rapide côté client MLflow : les relances sont pilotées par Prefect.
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "30"
     volumes:
       - ./data:/app/data
     deploy:
       resources:
         # 10 cœurs sur 12 : l'entraînement ne doit pas affamer MLflow/PostgreSQL.
+        limits: {memory: 2g, cpus: "10"}
+
+  # Worker Prefect : enregistre les déploiements (planifications) et exécute les runs.
+  worker:
+    <<: *restart
+    image: imdb-mlops/app:latest
+    command: python -m imdb_mlops.orchestration.serve
+    depends_on:
+      postgres: {condition: service_healthy}
+      prefect-server: {condition: service_healthy}
+      mlflow: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      PREFECT_LOGGING_EXTRA_LOGGERS: imdb_mlops
+      WATCH_INTERVAL_S: ${WATCH_INTERVAL_S:-1800}
+    volumes:
+      - ./data:/app/data
+    deploy:
+      resources:
         limits: {memory: 2g, cpus: "10"}
 
 volumes:

@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 (socle), 1 (ingestion, qualité) et 2 (entraînement, registre) en place. Les sections marquées 🚧 seront
+> Statut : étapes 0 (socle), 1 (ingestion, qualité), 2 (entraînement, registre) et 3 (orchestration) en place. Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -168,6 +168,47 @@ reproduit donc le *modèle* à partir des hyperparamètres retenus, pas le chemi
   - `min_improvement` relevé à 0,005, puis v3 rejeté (gain de 0,0015, considéré comme du bruit).
 - **Reproduction** du run v1 : écart de RMSE de 0,0.
 
+## Orchestration (Prefect)
+
+Le service `worker` ([serve.py](src/imdb_mlops/orchestration/serve.py)) enregistre deux
+déploiements, dont les planifications sont versionnées avec le code. L'interface Prefect
+(http://localhost:4200) donne l'historique des runs, les logs, les relances et les durées.
+
+| Déploiement | Déclenchement | Rôle |
+|---|---|---|
+| `watch-source` | toutes les 30 min (`WATCH_INTERVAL_S`) | Ingestion dynamique : si le dépôt source a un nouveau commit, lance la chaîne complète, sinon ne fait rien |
+| `daily-pipeline` | à la demande (UI ou CLI) | Données → qualité → entraînement → décision. Paramètres : `ref`, `fault`, `n_trials`, `train` |
+
+Le déclenchement par surveillance (pull) plutôt que par une heure fixe est voulu : le dépôt
+source annonce une mise à jour à 05:00 UTC, mais ses commits ont été observés vers 12:00–12:40
+UTC. Les deux déploiements ont `concurrency_limit=1`, pour éviter deux entraînements simultanés.
+
+**Gestion des échecs** ([flows.py](src/imdb_mlops/orchestration/flows.py)) :
+
+| Type d'erreur | Exemples | Comportement |
+|---|---|---|
+| Transitoire | réseau, MLflow ou GitHub injoignable | 2 relances (30 s puis 120 s pour les données, 60 s puis 180 s pour l'entraînement) |
+| Définitive | `DataQualityError`, `TrainingBlockedError` | aucune relance (inutile), échec immédiat avec le motif |
+| Tout échec de flow | | hook `on_failure`/`on_crashed` qui envoie une alerte critique (logs, webhook, table `alerts`) |
+
+Chaque étape est aussi tracée dans la table `pipeline_steps` (durée, statut, erreur), pour
+Grafana. Côté worker, le client MLflow échoue rapidement (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=2`),
+ce qui laisse à Prefect la politique de relance, visible et paramétrée.
+
+```bash
+docker compose up -d --wait                          # inclut le worker
+docker compose exec worker prefect deployment run watch-source/watch-source
+docker compose exec worker prefect deployment run daily-pipeline/daily-pipeline -p n_trials=6
+```
+
+### Incidents contrôlés (résultats observés)
+
+| Scénario | Commande | Résultat |
+|---|---|---|
+| Lot invalide | `... daily-pipeline -p fault=duplicates` | Tâche des données en `Failed`, **aucune relance**, entraînement non lancé, 2 alertes critiques (qualité et flow) |
+| Dépendance indisponible avec reprise | `docker compose stop mlflow`, puis lancement du flow, puis `docker compose start mlflow` pendant le délai de relance | Échec de l'entraînement (`MlflowException`), `AwaitingRetry`, relance 60 s plus tard réussie, flow en `Completed` |
+| Dépendance durablement indisponible | `docker compose stop mlflow`, puis lancement du flow | 3 tentatives, puis flow en `Failed` et alerte critique |
+
 ## Qualité et tests
 
 ```bash
@@ -207,6 +248,12 @@ uv run pytest -m integration         # nécessite docker compose up
   pas échouer un entraînement.
 - **Seuil de promotion à 0,005** : deux tunings sur les mêmes données diffèrent d'environ
   0,0015 de RMSE. Promouvoir sur un tel écart remplacerait le modèle en production sans gain réel.
+- **Prefect plutôt qu'Airflow** : déploiement léger (un serveur et un worker, environ 400 Mo),
+  flows écrits en Python pur et testables, relances conditionnelles natives
+  (`retry_condition_fn`). Airflow aurait demandé un scheduler, un webserver et des workers,
+  incompatibles avec un budget Docker de 3,9 Go.
+- **Features vectorisées** : la moyenne glissante calculée série par série prenait 40 à 50 s
+  dans le worker. En version vectorisée, il faut 3,5 s pour 421 000 épisodes.
 - **Limites mémoire par conteneur** : Docker ne dispose que d'environ 3,9 Go sur la machine de
   développement. Chaque service est borné pour qu'aucun ne puisse affamer les autres.
 

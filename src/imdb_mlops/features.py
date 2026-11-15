@@ -9,6 +9,8 @@ il n'est connu qu'après diffusion.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -53,9 +55,12 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     shifted = g[TARGET].shift(1)
     out["prev_rating"] = shifted
-    out["prev3_mean"] = shifted.groupby(out["series_id"], sort=False).transform(
-        lambda s: s.rolling(3, min_periods=1).mean()
-    )
+    # Moyenne des 3 épisodes précédents, vectorisée (un rolling par série coûtait ~40 s
+    # sur 10 000 séries) : nanmean des décalages 1, 2 et 3.
+    lags = np.column_stack([g[TARGET].shift(k).to_numpy(dtype="float64") for k in (1, 2, 3)])
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # lignes sans historique → NaN
+        out["prev3_mean"] = np.nanmean(lags, axis=1)
     out["prev_trend"] = out["prev3_mean"] - out["series_prev_mean"]
     out["log_prev_votes"] = np.log1p(g["votes"].shift(1).astype("float64"))
 

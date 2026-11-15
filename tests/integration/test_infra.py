@@ -1,5 +1,7 @@
 """Tests d'intégration de l'infrastructure : `docker compose up -d` doit avoir été lancé."""
 
+import os
+
 import httpx
 import pytest
 import redis
@@ -16,7 +18,8 @@ def test_mlflow_up():
 
 
 def test_prefect_up():
-    r = httpx.get("http://localhost:4200/api/health", timeout=5)
+    api = os.environ.get("PREFECT_API_URL", "http://localhost:4200/api")
+    r = httpx.get(f"{api}/health", timeout=5)
     assert r.status_code == 200
 
 
