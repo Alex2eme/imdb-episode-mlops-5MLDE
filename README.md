@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 à 5 en place (socle, données, entraînement, orchestration, API, suivi J+1). Les sections marquées 🚧 seront
+> Statut : étapes 0 à 6 en place (socle, données, entraînement, orchestration, API, suivi J+1, supervision). Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -36,7 +36,7 @@ API → feedback → supervision.
 | API | FastAPI + cache Redis |
 | Persistance | PostgreSQL |
 | Tests de charge | Locust |
-| Supervision | Prometheus + Grafana 🚧 |
+| Supervision | Prometheus (métriques et règles d'alerte) + Grafana (3 dashboards provisionnés) |
 
 ## Installation
 
@@ -63,6 +63,8 @@ docker compose up -d --wait   # démarre l'infrastructure
 | MLflow | http://localhost:5000 |
 | API (documentation interactive) | http://localhost:8000/docs |
 | Prefect | http://localhost:4200 |
+| Grafana (dashboards, consultation sans compte) | http://localhost:3000 |
+| Prometheus (métriques, alertes) | http://localhost:9090/alerts |
 | PostgreSQL | localhost:5432 (bases `mlflow`, `prefect`, `app`) |
 | Redis | localhost:6379 |
 
@@ -306,6 +308,39 @@ $R evaluate
 - Les 37 requêtes en 404 correspondent à des séries entrées dans le top 10 000 le 15/11,
   inconnues de l'API servie avec J. C'est le comportement attendu.
 
+## Supervision (Prometheus + Grafana)
+
+Grafana (http://localhost:3000, consultation sans compte ; admin : `GRAFANA_ADMIN_PASSWORD`)
+charge au démarrage trois dashboards versionnés, générés par
+[build_dashboards.py](docker/grafana/build_dashboards.py) dans le dossier « IMDb MLOps ».
+
+| Dashboard | Source | Contenu |
+|---|---|---|
+| **API : utilisation et performances** | Prometheus (relevé toutes les 5 s) | débit, latence p50/p95/p99 par endpoint, taux d'erreurs 4xx/5xx, codes d'erreur, prédictions par version et cache, taux de hit, note moyenne prédite, rechargements du modèle, file et pertes des traces, alertes actives |
+| **Traitements : données, pipeline, modèles** | PostgreSQL | dernier snapshot validé, champion, durée et statut des étapes Prefect, journal des exécutions avec erreurs, snapshots et contrôles qualité en échec, RMSE candidat/champion/baseline, décisions du registre, journal des alertes |
+| **Performance en production** | PostgreSQL | RMSE/MAE/biais live, nouveaux épisodes vs connus, par version, distribution des erreurs, plus grosses erreurs, prédictions par statut, durées et codes HTTP (p95), feedbacks |
+
+- **Lecture seule** : Grafana se connecte à PostgreSQL avec un utilisateur `grafana_ro`, qui a
+  le droit `SELECT` uniquement ([grafana-readonly.sh](docker/postgres/grafana-readonly.sh)).
+- **Règles d'alerte Prometheus** ([alerts.yml](docker/prometheus/alerts.yml)), visibles dans
+  Grafana et sur `/alerts` :
+
+| Alerte | Condition |
+|---|---|
+| `ApiDown` | API injoignable depuis 30 s |
+| `HighErrorRate` | plus de 5 % de réponses 5xx |
+| `HighPredictLatencyP95` | p95 de `/predict` au-dessus de 500 ms |
+| `ModelNotLoaded` | aucun modèle chargé |
+| `CacheUnavailable` | cache contourné |
+| `TracesDropped` | traces non écrites en base |
+
+- **Alertes de la chaîne** : celles du pipeline (qualité, échec de flow, dérive, décisions du
+  registre) sont dans la table `alerts`, affichée par le dashboard « Traitements », et
+  envoyées au webhook s'il est configuré.
+
+> Pour une base déjà initialisée avant l'ajout de Grafana, créer l'utilisateur en lecture seule :
+> `MSYS_NO_PATHCONV=1 docker compose exec postgres sh /docker-entrypoint-initdb.d/20-grafana-readonly.sh`
+
 ## Qualité et tests
 
 ```bash
@@ -358,6 +393,9 @@ uv run pytest -m integration         # nécessite docker compose up
 - **Traces écrites hors du chemin de réponse** : une file bornée et un thread d'insertion par
   lots. Une base lente ou en panne ne ralentit pas l'API : les traces perdues sont comptées
   (`db_traces_dropped_total`).
+- **Dashboards générés par du code** : un script Python produit les JSON provisionnés. Les
+  requêtes sont relisibles, la mise en page est cohérente, et les dashboards ne peuvent pas être
+  modifiés depuis l'interface (`allowUiUpdates: false`). Toute modification passe par Git.
 - **Limites mémoire par conteneur** : Docker ne dispose que d'environ 3,9 Go sur la machine de
   développement. Chaque service est borné pour qu'aucun ne puisse affamer les autres.
 

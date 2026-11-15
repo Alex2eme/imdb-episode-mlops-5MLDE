@@ -1,0 +1,49 @@
+# Règles d'alerte du service de prédiction (visibles sur http://localhost:9090/alerts
+# et dans Grafana). Seuils dérivés des mesures des tests de charge.
+groups:
+  - name: api
+    rules:
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "API de prédiction injoignable"
+
+      - alert: HighErrorRate
+        expr: |
+          100 * sum(rate(api_requests_total{status=~"5.."}[2m]))
+            / clamp_min(sum(rate(api_requests_total{endpoint!="/health"}[2m])), 1e-9) > 5
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Plus de 5 % de réponses 5xx sur 2 minutes"
+
+      - alert: HighPredictLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(api_request_duration_seconds_bucket{endpoint="/predict"}[2m]))) > 0.5
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Latence p95 de /predict supérieure à 500 ms"
+
+      - alert: ModelNotLoaded
+        expr: absent(model_info) or sum(model_info) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Aucun modèle chargé par l'API (503 sur /predict)"
+
+      - alert: CacheUnavailable
+        expr: sum(increase(cache_requests_total{result=~"error|bypass"}[5m])) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Cache Redis contourné (service dégradé, latence accrue)"
+
+      - alert: TracesDropped
+        expr: sum(increase(db_traces_dropped_total[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Traces d'utilisation non écrites en base (PostgreSQL indisponible ?)"
