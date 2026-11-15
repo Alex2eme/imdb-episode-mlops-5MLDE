@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 à 6 en place (socle, données, entraînement, orchestration, API, suivi J+1, supervision). Les sections marquées 🚧 seront
+> Statut : étapes 0 à 7 en place (socle, données, entraînement, orchestration, API, suivi J+1, supervision, tests de charge). Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -33,7 +33,7 @@ API → feedback → supervision.
 | Orchestration | Prefect 3 |
 | Suivi et registre des modèles | MLflow (métadonnées dans PostgreSQL, artefacts servis par MLflow sur un volume Docker) |
 | Modèle | LightGBM + Optuna |
-| API | FastAPI + cache Redis |
+| API | FastAPI + cache LRU local (Redis optionnel) |
 | Persistance | PostgreSQL |
 | Tests de charge | Locust |
 | Supervision | Prometheus (métriques et règles d'alerte) + Grafana (3 dashboards provisionnés) |
@@ -340,6 +340,79 @@ charge au démarrage trois dashboards versionnés, générés par
 
 > Pour une base déjà initialisée avant l'ajout de Grafana, créer l'utilisateur en lecture seule :
 > `MSYS_NO_PATHCONV=1 docker compose exec postgres sh /docker-entrypoint-initdb.d/20-grafana-readonly.sh`
+
+## Tests de charge et dimensionnement
+
+Outils : [locustfile.py](loadtests/locustfile.py) (scénario),
+[run_benchmarks.py](loadtests/run_benchmarks.py) (un scénario = redéploiement de l'API avec
+une configuration, échauffement, mesure, relevé CPU et RAM),
+[campaign.sh](loadtests/campaign.sh) (campagne complète, environ 45 min) et
+[report.py](loadtests/report.py), qui produit **[RESULTS.md](reports/loadtests/RESULTS.md)**.
+
+```bash
+bash loadtests/campaign.sh && python loadtests/report.py
+# ou un scénario seul :
+python loadtests/run_benchmarks.py --name essai --workers 2 --cpus 2 --cache false --users 30
+```
+
+**Scénario** :
+- 85 % de `/predict`, avec des séries tirées selon leur popularité (votes), ce qui donne un
+  taux de répétition réaliste pour le cache ;
+- 5 % de lots de 20 épisodes, 5 % de `/model`, 5 % d'entrées invalides (422 attendu) ;
+- utilisateurs sans pause, pour mesurer la capacité ;
+- Locust en 4 processus avec `FastHttpUser`, dans un conteneur du même réseau Docker.
+
+### Démarche : chaque optimisation a été motivée par une mesure
+
+| # | Constat (mesure) | Cause identifiée | Action | Effet mesuré |
+|---|---|---|---|---|
+| 1 | 7,5 req/s, `/predict` p50 1,6 s (dashboard puis Locust) | features recalculées avec pandas à chaque requête (178 ms) et prédiction via le wrapper scikit-learn (24 ms) | features d'inférence en numpy sur un historique pré-indexé, booster LightGBM appelé directement | features 178 ms → **0,29 ms**, prédiction 24 ms → **0,94 ms**, même conditions : 7,5 → **61,6 req/s** (×8) ; équivalence entraînement/inférence vérifiée par test sur chaque ligne |
+| 2 | Conteneur bridé (`nr_throttled`), pics p99 de 5 s | LightGBM ouvre 12 threads OpenMP (cœurs visibles) dans un conteneur limité à 1-2 CPU | `num_threads=1`, `OMP_NUM_THREADS=1` (le parallélisme passe par les workers) | suppression des threads concurrents |
+| 3 | 2 ou 4 workers n'apportent rien ; logs d'accès toujours présents | commande YAML repliée : `--workers` et `--no-access-log` **ignorés**, un seul worker effectif | commande en forme liste, vérification des processus dans le conteneur | 1 worker sans log d'accès : 61 → 113 req/s ; mesures antérieures rectifiées dans `results.json` |
+| 4 | 1 worker ≈ 2 workers ≈ 110 req/s | le générateur (Locust, 1 processus, client `requests`) plafonnait | `FastHttpUser` et 4 processus Locust | 2 workers : jusqu'à 245 req/s |
+| 5 | à 2 workers : connexions coupées, workers « died » | le parent uvicorn tue un worker qui ne répond pas à son ping en 5 s quand il est saturé | `--timeout-worker-healthcheck 30` | 0 échec sur plus de 140 000 requêtes de la campagne |
+| 6 | 4 workers : 503 `model_unavailable` pendant 30 s | 56 s par worker pour indexer les 9 912 historiques, et téléchargements simultanés depuis MLflow | indexation vectorisée (tri unique), 5 tentatives de chargement au démarrage | indexation 56 s → **2,2 s**, 0 échec à 4 workers |
+| 7 | cache Redis : débit −13 %, p95 +20 % | 2 allers-retours réseau (environ 1,1 ms chacun ici) pour 16 % de hits, alors que le calcul ne coûte plus que 1,5 ms | cache **LRU local** par worker en premier niveau, **Redis désactivé par défaut** | Redis seul : 116 req/s contre 134 sans cache ; LRU local : pas de différence significative (variabilité) |
+
+### Résultats de la campagne (médiane de 3 runs, détail dans RESULTS.md)
+
+| Configuration | Débit médian | /predict p50 | p95 | RAM max |
+|---|---|---|---|---|
+| 1 worker, 1 CPU | 146 req/s | 160 ms | 490 ms | 465 Mio |
+| 2 workers, 2 CPU | 134 req/s | 140 ms | 400 ms | 727 Mio |
+| 4 workers, 4 CPU | 179 req/s | 115 ms | 365 ms | 1 275 Mio |
+| 2 workers, 2 CPU + Redis | 116 req/s | 190 ms | 490 ms | 850 Mio |
+
+Les latences ci-dessus sont celles d'une saturation volontaire (30 clients sans pause). Pour un
+débit réel modéré, la montée en charge (2 workers) donne : **p50 5 ms à 1 client**, p95 82 ms à
+5 clients (140 req/s), p95 140 ms à 20 clients (245 req/s), et l'objectif p95 ≤ 300 ms est
+dépassé à partir d'environ 40 clients simultanés.
+
+### Recommandation
+
+Hypothèses : un utilisateur actif fait une prédiction toutes les 10 s (0,1 req/s) ; objectif
+p95 ≤ 300 ms ; on n'exploite que 70 % de la capacité mesurée.
+
+| Utilisateurs actifs | Charge | Configuration recommandée | RAM à réserver |
+|---|---|---|---|
+| jusqu'à **500** | ≤ 50 req/s | 1 worker, 1 CPU | 0,75 Go |
+| jusqu'à **1 000** | ≤ 100 req/s | **2 workers, 2 CPU** (défaut, et un worker peut tomber sans interrompre le service) | 1,5 Go |
+| 1 000 à 1 250 | ≤ 125 req/s | 4 workers, 4 CPU (gain mesuré de seulement +23 % pour 2 fois plus de CPU) | 2 Go |
+| au-delà | > 100 req/s | **mise à l'échelle horizontale** : N réplicas de 2 workers / 2 CPU derrière un répartiteur, avec N = ⌈utilisateurs / 1 000⌉ ; PostgreSQL et MLflow partagés | 1,5 Go par réplica |
+
+- **Cache** : Redis ne devient rentable que si une prédiction coûte nettement plus qu'un
+  aller-retour réseau (modèle plus lourd, features calculées à la volée). C'était le cas avant
+  l'optimisation 1, plus après. Le cache LRU local reste actif : son coût est négligeable
+  (environ 10 Mio) et il sert aussi pendant une panne de Redis.
+- **Limites de ces mesures** :
+  - générateur et API partagent le même poste, sous Docker Desktop/WSL2, où un simple aller-retour
+    réseau coûte 1 à 3 ms ;
+  - la variabilité d'un run à l'autre atteint ±30 %, d'où les 3 répétitions et l'usage de la
+    médiane ;
+  - un run sur 3 de la configuration 4 workers a échoué au déploiement ;
+  - environ 2 000 traces d'utilisation (≈ 0,3 %) ont été perdues pendant la campagne, sans que la
+    cause puisse être établie, car les journaux ont été effacés par les redéploiements ;
+  - à re-mesurer sur l'infrastructure cible avant une mise en production.
 
 ## Qualité et tests
 

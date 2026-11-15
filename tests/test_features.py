@@ -63,3 +63,62 @@ def test_temporal_split_keeps_last_episodes_in_test(small):
     train, test = temporal_split(feats, 0.4)
     assert set(test["series_id"]) == {"tt1"}  # tt2 trop courte
     assert test["series_ep_index"].min() > train[train.series_id == "tt1"]["series_ep_index"].max()
+
+
+def _random_series(seed: int = 0, n_series: int = 30) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    rows = []
+    for i in range(n_series):
+        for season in range(int(rng.integers(0, 4)), int(rng.integers(4, 7))):
+            for episode in sorted(
+                rng.choice(range(0, 25), int(rng.integers(1, 12)), replace=False)
+            ):
+                rows.append(
+                    (
+                        f"tt{i:07d}",
+                        1000 + i,
+                        season,
+                        int(episode),
+                        round(float(rng.uniform(1, 10)), 1),
+                        int(rng.integers(10, 9999)),
+                    )
+                )
+    return pd.DataFrame(
+        rows, columns=["series_id", "series_votes", "season", "episode", "rating", "votes"]
+    )
+
+
+def test_fast_serving_features_match_training_on_every_row():
+    from imdb_mlops.features import SeriesHistory, serving_features
+
+    df = _random_series()
+    train = build_features(df)
+    histories = {sid: SeriesHistory.from_frame(g) for sid, g in df.groupby("series_id")}
+    fast = np.vstack(
+        [serving_features(histories[r.series_id], r.season, r.episode) for r in train.itertuples()]
+    )
+    np.testing.assert_allclose(
+        fast, train[FEATURES].to_numpy(float), rtol=1e-9, atol=1e-9, equal_nan=True
+    )
+
+
+def test_fast_serving_features_match_reference_for_unseen_episodes():
+    from imdb_mlops.features import SeriesHistory, serving_features
+
+    df = _random_series(seed=1, n_series=10)
+    for sid, g in df.groupby("series_id"):
+        h = SeriesHistory.from_frame(g)
+        last = g.sort_values(["season", "episode"]).iloc[-1]
+        for season, episode in [
+            (int(last.season), int(last.episode) + 1),
+            (int(last.season) + 1, 1),
+            (0, 0),
+        ]:
+            np.testing.assert_allclose(
+                serving_features(h, season, episode),
+                features_for(g, season, episode).iloc[0].to_numpy(float),
+                rtol=1e-9,
+                atol=1e-9,
+                equal_nan=True,
+                err_msg=f"{sid} S{season}E{episode}",
+            )

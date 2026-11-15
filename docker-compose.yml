@@ -144,10 +144,17 @@ services:
   api:
     <<: *restart
     image: imdb-mlops/app:latest
-    command: >
-      sh -c "rm -rf /tmp/prom && mkdir -p /tmp/prom &&
-             exec uvicorn imdb_mlops.api.app:app --host 0.0.0.0 --port 8000
-             --workers $${API_WORKERS} --no-access-log"
+    # Forme liste : un bloc YAML replié conservait des retours à la ligne et les options
+    # --workers/--no-access-log étaient ignorées (constaté pendant les tests de charge).
+    command:
+      - sh
+      - -c
+      # --timeout-worker-healthcheck 30 : à 5 s (défaut), un worker saturé ne répondait plus
+      # au ping du processus parent et était tué en pleine charge (connexions coupées).
+      - exec uvicorn imdb_mlops.api.app:app --host 0.0.0.0 --port 8000 --workers $${API_WORKERS} --no-access-log --timeout-worker-healthcheck 30
+    # Métriques Prometheus multi-processus : tmpfs, donc vidé à chaque démarrage.
+    tmpfs:
+      - /tmp/prom
     depends_on:
       postgres: {condition: service_healthy}
       mlflow: {condition: service_healthy}
@@ -155,9 +162,14 @@ services:
     environment:
       <<: *app-env
       API_WORKERS: ${API_WORKERS:-2}
-      CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      # Redis désactivé par défaut : -13 % de débit mesuré (hit ~16 %, voir
+      # reports/loadtests/RESULTS.md). Le cache LRU local par worker reste actif.
+      CACHE_ENABLED: ${CACHE_ENABLED:-false}
+      LOCAL_CACHE_SIZE: ${LOCAL_CACHE_SIZE:-50000}
       MODEL_REFRESH_S: "30"
       PROMETHEUS_MULTIPROC_DIR: /tmp/prom
+      # Une seule thread OpenMP par worker (voir model_store._predict_array).
+      OMP_NUM_THREADS: "1"
     ports: ["8000:8000"]
     volumes:
       - ./data:/app/data:ro
@@ -169,7 +181,7 @@ services:
       start_period: 40s
     deploy:
       resources:
-        limits: {memory: "${API_MEMORY:-1g}", cpus: "${API_CPUS:-2}"}
+        limits: {memory: "${API_MEMORY:-2g}", cpus: "${API_CPUS:-2}"}
 
   prometheus:
     <<: *restart

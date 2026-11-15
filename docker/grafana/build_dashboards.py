@@ -261,8 +261,8 @@ def api_dashboard() -> dict:
             "Taux de hit du cache",
             [
                 prom(
-                    'sum(rate(cache_requests_total{result="hit"}[5m])) / '
-                    'clamp_min(sum(rate(cache_requests_total{result=~"hit|miss|bypass"}[5m])), 1e-9)'
+                    'sum(rate(cache_requests_total{result=~"hit|hit_local"}[5m])) / '
+                    'clamp_min(sum(rate(cache_requests_total{result=~"hit|hit_local|miss|bypass"}[5m])), 1e-9)'
                 )
             ],
             unit="percentunit",

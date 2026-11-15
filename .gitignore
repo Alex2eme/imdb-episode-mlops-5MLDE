@@ -21,6 +21,9 @@ mlruns/
 mlartifacts/
 gx/uncommitted/
 reports/loadtests/*.html
+reports/loadtests/*_failures.csv
+reports/loadtests/*_exceptions.csv
+reports/loadtests/*_stats_history.csv
 *.parquet
 
 # IDE / OS

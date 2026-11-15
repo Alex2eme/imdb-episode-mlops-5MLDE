@@ -112,3 +112,84 @@ def temporal_split(feats: pd.DataFrame, test_size: float) -> tuple[pd.DataFrame,
     is_test = feats["series_ep_index"] >= np.floor(n * (1 - test_size))
     is_test &= n >= 3  # séries trop courtes : uniquement en entraînement
     return feats[~is_test], feats[is_test]
+
+
+# --- Inférence rapide (API) ------------------------------------------------------------
+# Même définition que build_features, recalculée en numpy sur l'historique pré-indexé d'une
+# série : ~quelques µs au lieu de ~50 ms avec pandas (mesuré en test de charge). L'égalité
+# stricte avec build_features est vérifiée par tests/test_features.py.
+
+_EP_BASE = 100_000  # épisode < 100 000 : clé triable season * _EP_BASE + episode
+
+
+class SeriesHistory:
+    """Historique d'une série trié par (saison, épisode), en tableaux numpy."""
+
+    __slots__ = ("keys", "ratings", "series_votes", "votes")
+
+    def __init__(
+        self, keys: np.ndarray, ratings: np.ndarray, votes: np.ndarray, series_votes: float
+    ):
+        self.keys, self.ratings, self.votes = keys, ratings, votes
+        self.series_votes = float(series_votes)
+
+    @classmethod
+    def from_frame(cls, df: pd.DataFrame) -> SeriesHistory:
+        """Historique d'une seule série (tests, usage ponctuel)."""
+        return next(iter(build_histories(df).values()))
+
+
+def build_histories(df: pd.DataFrame) -> dict[str, SeriesHistory]:
+    """Historiques de toutes les séries en un seul tri global puis découpage par série.
+
+    Un tri pandas par série prenait ~56 s pour 9 912 séries (démarrage de chaque worker) ;
+    cette version prend moins d'une seconde.
+    """
+    df = df.sort_values(KEY, kind="stable")
+    sids = df["series_id"].to_numpy()
+    keys = df["season"].to_numpy(np.int64) * _EP_BASE + df["episode"].to_numpy(np.int64)
+    ratings = df[TARGET].to_numpy(np.float64)
+    votes = df["votes"].to_numpy(np.float64)
+    series_votes = df["series_votes"].to_numpy(np.float64)
+    starts = np.flatnonzero(np.r_[True, sids[1:] != sids[:-1]])
+    ends = np.r_[starts[1:], len(sids)]
+    return {
+        sids[a]: SeriesHistory(keys[a:b], ratings[a:b], votes[a:b], series_votes[a])
+        for a, b in zip(starts, ends, strict=True)
+    }
+
+
+def serving_features(h: SeriesHistory, season: int, episode: int) -> np.ndarray:
+    """Vecteur de features (ordre FEATURES) de l'épisode, à partir des épisodes antérieurs."""
+    k = int(np.searchsorted(h.keys, season * _EP_BASE + episode, side="left"))
+    season_start = int(np.searchsorted(h.keys, season * _EP_BASE, side="left"))
+    n_season = k - season_start
+    nan = np.nan
+    if k:
+        prev = h.ratings[:k]
+        mean = prev.mean()
+        std = np.sqrt(max((prev * prev).mean() - mean * mean, 0.0)) if k > 1 else nan
+        prev_rating = prev[-1]
+        prev3 = prev[-3:].mean()
+        log_prev_votes = np.log1p(h.votes[k - 1])
+    else:
+        mean = std = prev_rating = prev3 = log_prev_votes = nan
+    season_mean = h.ratings[season_start:k].mean() if n_season else nan
+    return np.array(
+        [
+            season,
+            episode,
+            float(n_season == 0),
+            k,
+            n_season,
+            np.log1p(h.series_votes),
+            mean,
+            std,
+            prev_rating,
+            prev3,
+            season_mean,
+            prev3 - mean,
+            log_prev_votes,
+        ],
+        dtype=np.float64,
+    )

@@ -278,7 +278,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(cache_requests_total{result=\"hit\"}[5m])) / clamp_min(sum(rate(cache_requests_total{result=~\"hit|miss|bypass\"}[5m])), 1e-9)",
+          "expr": "sum(rate(cache_requests_total{result=~\"hit|hit_local\"}[5m])) / clamp_min(sum(rate(cache_requests_total{result=~\"hit|hit_local|miss|bypass\"}[5m])), 1e-9)",
           "legendFormat": "",
           "range": true
         }

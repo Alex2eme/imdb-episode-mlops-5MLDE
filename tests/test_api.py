@@ -14,6 +14,7 @@ from imdb_mlops.api.cache import PredictionCache
 from imdb_mlops.api.model_store import Loaded, ModelStore
 from imdb_mlops.api.telemetry import TraceWriter
 from imdb_mlops.config import load_config
+from imdb_mlops.features import SeriesHistory
 
 
 class FakeModel:
@@ -63,7 +64,7 @@ def _history():
             "votes": [100, 90, 120, 110],
         }
     )
-    return {"tt0000001": df}
+    return {"tt0000001": SeriesHistory.from_frame(df)}
 
 
 @pytest.fixture
@@ -203,9 +204,41 @@ def test_redis_down_degrades_gracefully(make_client):
     assert client.get("/ready").json()["cache"] == "down"
 
 
+def test_ready_reports_disabled_redis(make_client):
+    client, _ = make_client()
+    api_module.app.state.cache = PredictionCache(None, local_size=10)
+    body = client.get("/ready").json()
+    assert (body["cache"], body["local_cache"]) == ("disabled", "enabled")
+
+
 def test_metrics_exposed(make_client):
     client, _ = make_client()
     client.post("/predict", json=EP)
     text = client.get("/metrics").text
     assert "api_requests_total" in text
     assert "predictions_total" in text
+
+
+def test_local_lru_cache_without_redis():
+    from imdb_mlops.api.cache import LocalLRU
+
+    cache = PredictionCache(None, local_size=2)
+    assert cache.enabled
+    cache.set_many({"a": 1.0, "b": 2.0})
+    assert cache.get_many(["a", "b", "c"]) == [1.0, 2.0, None]
+    cache.set_many({"c": 3.0})  # éviction du moins récemment utilisé
+    lru = LocalLRU(2)
+    lru.set("x", 1.0)
+    lru.set("y", 2.0)
+    lru.get("x")
+    lru.set("z", 3.0)
+    assert lru.get("y") is None and lru.get("x") == 1.0
+
+
+def test_local_cache_in_front_of_redis(make_client):
+    redis_client = FakeRedis()
+    client, _ = make_client(redis_client=redis_client)
+    api_module.app.state.cache = PredictionCache(None, client=redis_client, local_size=100)
+    assert client.post("/predict", json=EP).json()["cached"] is False
+    redis_client.fail = True  # Redis en panne : le niveau local sert encore
+    assert client.post("/predict", json=EP).json()["cached"] is True

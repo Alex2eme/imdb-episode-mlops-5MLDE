@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 
 import redis
 
@@ -22,8 +23,46 @@ from imdb_mlops.api import telemetry
 log = logging.getLogger(__name__)
 
 
+class LocalLRU:
+    """Cache local au worker (niveau 1) : aucun aller-retour réseau.
+
+    Ajouté après les tests de charge : avec un calcul de prédiction à ~1,5 ms, deux
+    allers-retours Redis (~1,1 ms chacun sur la plateforme de mesure) coûtaient plus cher que
+    le calcul pour un taux de hit de ~17 % (débit -40 %).
+    """
+
+    def __init__(self, max_size: int):
+        self.max_size = max_size
+        self._data: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> float | None:
+        with self._lock:
+            value = self._data.get(key)
+            if value is not None:
+                self._data.move_to_end(key)
+            return value
+
+    def set(self, key: str, value: float) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            if len(self._data) > self.max_size:
+                self._data.popitem(last=False)
+
+
 class PredictionCache:
-    def __init__(self, url: str | None, ttl_s: int = 86400, cooldown_s: float = 2.0, client=None):
+    """Cache à deux niveaux : LRU local (par worker) puis Redis (partagé, optionnel)."""
+
+    def __init__(
+        self,
+        url: str | None,
+        ttl_s: int = 86400,
+        cooldown_s: float = 2.0,
+        client=None,
+        local_size: int = 0,
+    ):
+        self.local = LocalLRU(local_size) if local_size > 0 else None
         self.ttl_s = ttl_s
         self.cooldown_s = cooldown_s
         self._healthy = True  # coupe-circuit : False = Redis contourné
@@ -35,8 +74,12 @@ class PredictionCache:
             threading.Thread(target=self._watch, name="redis-watch", daemon=True).start()
 
     @property
-    def enabled(self) -> bool:
+    def redis_configured(self) -> bool:
         return self._client is not None
+
+    @property
+    def enabled(self) -> bool:
+        return self._client is not None or self.local is not None
 
     @staticmethod
     def key(version: str, data_sha: str, sid: str, season: int, episode: int) -> str:
@@ -66,6 +109,24 @@ class PredictionCache:
             self._healthy = ok
 
     def get_many(self, keys: list[str]) -> list[float | None]:
+        out: list[float | None] = [None] * len(keys)
+        if self.local is not None:
+            out = [self.local.get(k) for k in keys]
+            n_local = sum(v is not None for v in out)
+            telemetry.CACHE_REQUESTS.labels(result="hit_local").inc(n_local)
+            missing = [i for i, v in enumerate(out) if v is None]
+            if not missing or self._client is None:
+                telemetry.CACHE_REQUESTS.labels(result="miss").inc(len(missing))
+                return out
+            remote = self._get_remote([keys[i] for i in missing])
+            for i, v in zip(missing, remote, strict=True):
+                if v is not None:
+                    out[i] = v
+                    self.local.set(keys[i], v)
+            return out
+        return self._get_remote(keys)
+
+    def _get_remote(self, keys: list[str]) -> list[float | None]:
         if not keys or not self._available():
             if self._client is not None:
                 telemetry.CACHE_REQUESTS.labels(result="bypass").inc(len(keys))
@@ -82,6 +143,9 @@ class PredictionCache:
         return out
 
     def set_many(self, items: dict[str, float]) -> None:
+        if self.local is not None:
+            for k, v in items.items():
+                self.local.set(k, v)
         if not items or not self._available():
             return
         try:

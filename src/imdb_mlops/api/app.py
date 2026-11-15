@@ -6,6 +6,7 @@ Documentation interactive : /docs
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -19,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from sqlalchemy import select
+from starlette.datastructures import MutableHeaders
 
 from imdb_mlops import __version__, db
 from imdb_mlops.api import telemetry
@@ -42,6 +44,9 @@ log = logging.getLogger("imdb_mlops.api")
 REFRESH_S = float(os.environ.get("MODEL_REFRESH_S", "30"))
 CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
 TRACES_ENABLED = os.environ.get("TRACES_ENABLED", "true").lower() == "true"
+# Cache local LRU par worker (entrées) ; 0 = désactivé. Voir api/cache.py.
+LOCAL_CACHE_SIZE = int(os.environ.get("LOCAL_CACHE_SIZE", "50000"))
+STARTUP_LOAD_ATTEMPTS = int(os.environ.get("STARTUP_LOAD_ATTEMPTS", "5"))
 
 ERROR_RESPONSES = {
     404: {"model": ErrorResponse, "description": "Série ou prédiction inconnue"},
@@ -78,7 +83,7 @@ async def lifespan(app: FastAPI):
     cfg = load_config()
     app.state.store = getattr(app.state, "store", None) or ModelStore(cfg)
     app.state.cache = getattr(app.state, "cache", None) or PredictionCache(
-        get_settings().redis_url if CACHE_ENABLED else None
+        get_settings().redis_url if CACHE_ENABLED else None, local_size=LOCAL_CACHE_SIZE
     )
     app.state.writer = getattr(app.state, "writer", None) or telemetry.TraceWriter(
         enabled=TRACES_ENABLED
@@ -88,8 +93,15 @@ async def lifespan(app: FastAPI):
             db.init_db()
         except Exception as exc:
             log.warning("Base indisponible au démarrage : %s", exc)
-    if not app.state.store.ready:
-        _refresh(app, force=True)  # en cas d'échec : démarrage en mode dégradé (503)
+    # Plusieurs tentatives au démarrage : avec N workers qui téléchargent le modèle en même
+    # temps, MLflow peut refuser une requête (constaté à 4 workers : 503 pendant 30 s). Après
+    # ces tentatives, démarrage en mode dégradé (503) et nouvel essai toutes les 30 s.
+    for attempt in range(STARTUP_LOAD_ATTEMPTS):
+        if app.state.store.ready:
+            break
+        if attempt:
+            await asyncio.sleep(2 * attempt)
+        _refresh(app, force=True)
     app.state.writer.start()
     stop = threading.Event()
     threading.Thread(target=_refresh_loop, args=(app, stop), daemon=True).start()
@@ -110,41 +122,72 @@ app = FastAPI(
 # --- Middleware : identifiant de requête, durée, traces --------------------------------
 
 
-@app.middleware("http")
-async def observe(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
-    request.state.request_id = request_id
-    request.state.error = None
-    start = time.perf_counter()
-    response = await call_next(request)
-    duration = time.perf_counter() - start
-    route = request.scope.get("route")
-    endpoint = getattr(route, "path", "unmatched")
-    response.headers["X-Request-ID"] = request_id
-    store: ModelStore = request.app.state.store
-    version = store.current.version if store.ready else None
-    if version:
-        response.headers["X-Model-Version"] = version
-    if endpoint != "/metrics":
-        telemetry.REQUESTS.labels(endpoint, request.method, str(response.status_code)).inc()
-        telemetry.LATENCY.labels(endpoint).observe(duration)
-    # Sondes de santé (Docker) : comptées dans Prometheus, pas tracées en base.
-    if endpoint not in {"/metrics", "/health"}:
-        request.app.state.writer.put(
-            "api_requests",
-            {
-                "created_at": datetime.now(UTC),
-                "request_id": request_id,
-                "method": request.method,
-                "path": endpoint,
-                "status_code": response.status_code,
-                "duration_ms": duration * 1000,
-                "error": request.state.error,
-                "model_version": version,
-                "worker_pid": os.getpid(),
-            },
+class ObserveMiddleware:
+    """Middleware ASGI pur : identifiant de requête, version, métriques, traces.
+
+    Remplace `@app.middleware("http")` (BaseHTTPMiddleware de Starlette), dont le surcoût
+    mesuré était d'environ 6 ms par requête dans ce conteneur (tests de charge).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = (
+            next((v.decode() for k, v in scope["headers"] if k == b"x-request-id"), None)
+            or uuid.uuid4().hex
         )
-    return response
+        state = scope.setdefault("state", {})
+        state["request_id"], state["error"] = request_id, None
+        store: ModelStore = scope["app"].state.store
+        version = store.current.version if store.ready else None
+        status = {"code": 500}
+        start = time.perf_counter()
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers["X-Request-ID"] = request_id
+                if version:
+                    headers["X-Model-Version"] = version
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            self._record(scope, state, status["code"], time.perf_counter() - start, version)
+
+    @staticmethod
+    def _record(scope, state, status_code: int, duration: float, version) -> None:
+        endpoint = getattr(scope.get("route"), "path", "unmatched")
+        if endpoint == "/metrics":
+            return
+        method = scope["method"]
+        telemetry.REQUESTS.labels(endpoint, method, str(status_code)).inc()
+        telemetry.LATENCY.labels(endpoint).observe(duration)
+        # Sondes de santé (Docker) : comptées dans Prometheus, pas tracées en base.
+        if endpoint != "/health":
+            scope["app"].state.writer.put(
+                "api_requests",
+                {
+                    "created_at": datetime.now(UTC),
+                    "request_id": state["request_id"],
+                    "method": method,
+                    "path": endpoint,
+                    "status_code": status_code,
+                    "duration_ms": duration * 1000,
+                    "error": state.get("error"),
+                    "model_version": version,
+                    "worker_pid": os.getpid(),
+                },
+            )
+
+
+app.add_middleware(ObserveMiddleware)
 
 
 def _error(request: Request, status: int, code: str, message: str, details=None):
@@ -347,9 +390,16 @@ def post_feedback(body: FeedbackRequest, request: Request) -> FeedbackResponse:
 
 
 @app.get("/health", tags=["exploitation"])
-def health() -> dict:
+async def health() -> dict:
     """Liveness : le processus répond."""
     return {"status": "ok"}
+
+
+def _cache_status(cache: PredictionCache) -> str:
+    """État de Redis : `disabled` (non configuré), `up` ou `down` (contourné)."""
+    if not cache.redis_configured:
+        return "disabled"
+    return "up" if cache.ping() else "down"
 
 
 @app.get("/ready", tags=["exploitation"])
@@ -360,13 +410,14 @@ def ready(request: Request) -> JSONResponse:
         "model_loaded": store.ready,
         "model_version": store.current.version if store.ready else None,
         "last_error": store.last_error,
-        "cache": "up" if request.app.state.cache.ping() else "down",
+        "cache": _cache_status(request.app.state.cache),
+        "local_cache": "enabled" if request.app.state.cache.local is not None else "disabled",
     }
     return JSONResponse(status_code=200 if store.ready else 503, content=body)
 
 
 @app.get("/model", response_model=ModelInfo, responses=ERROR_RESPONSES, tags=["exploitation"])
-def model_info(request: Request) -> ModelInfo:
+async def model_info(request: Request) -> ModelInfo:
     """Version servie (alias `champion` du registre) et données d'historique utilisées."""
     m = request.app.state.store.current
     return ModelInfo(

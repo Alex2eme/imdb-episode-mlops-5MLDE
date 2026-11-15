@@ -17,7 +17,7 @@ import pandas as pd
 
 from imdb_mlops import db
 from imdb_mlops.config import ROOT_DIR, AppConfig
-from imdb_mlops.features import FEATURES, features_for
+from imdb_mlops.features import FEATURES, SeriesHistory, build_histories, serving_features
 
 log = logging.getLogger(__name__)
 
@@ -38,18 +38,34 @@ class Loaded:
     run_id: str
     rmse: float | None
     data_sha: str
-    history: dict[str, pd.DataFrame]
+    history: dict[str, SeriesHistory]
     loaded_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
-def _load_history(sha: str | None = None) -> tuple[str, dict[str, pd.DataFrame]]:
+def _load_history(sha: str | None = None) -> tuple[str, dict[str, SeriesHistory]]:
     snap = db.get_snapshot(sha) if sha else db.last_valid_snapshot()
     if snap is None:
         raise ModelUnavailableError("Aucun snapshot validé pour l'historique des séries")
     df = pd.read_parquet(ROOT_DIR / snap["parquet_path"])
     cols = ["series_id", "series_votes", "season", "episode", "rating", "votes"]
-    history = {sid: g.reset_index(drop=True) for sid, g in df[cols].groupby("series_id")}
+    # Pré-indexation par série (tableaux numpy triés) : features calculées en microsecondes.
+    history = build_histories(df[cols])
     return snap["sha"], history
+
+
+def _predict_array(model, X: np.ndarray) -> np.ndarray:
+    """Appel direct du booster LightGBM sur un tableau : évite la construction d'un
+    DataFrame et les contrôles du wrapper scikit-learn (coûteux pour une seule ligne)."""
+    booster = getattr(model, "booster_", None)
+    if booster is not None:
+        # num_threads=1 : par défaut LightGBM lance un thread OpenMP par cœur *visible* (12),
+        # alors que le conteneur n'a droit qu'à 1-2 CPU ; l'attente active de ces threads
+        # épuise le quota et Linux bride tout le conteneur (mesuré : p99 ~5 s). La
+        # parallélisation se fait par les workers uvicorn, pas à l'intérieur d'une requête.
+        return booster.predict(
+            X, num_iteration=getattr(model, "best_iteration_", None) or None, num_threads=1
+        )
+    return model.predict(pd.DataFrame(X, columns=FEATURES))
 
 
 class ModelStore:
@@ -140,10 +156,10 @@ class ModelStore:
             if history is None:
                 errors[i] = "unknown_series"
                 continue
-            rows.append(features_for(history, season, episode))
+            rows.append(serving_features(history, season, episode))
             ok_idx.append(i)
         preds = np.full(len(refs), np.nan)
         if rows:
-            X = pd.concat(rows, ignore_index=True)[FEATURES]
-            preds[ok_idx] = np.clip(loaded.model.predict(X), 1.0, 10.0)
+            X = np.vstack(rows)
+            preds[ok_idx] = np.clip(_predict_array(loaded.model, X), 1.0, 10.0)
         return preds, errors
