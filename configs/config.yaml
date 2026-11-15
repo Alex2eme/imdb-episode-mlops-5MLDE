@@ -1,0 +1,30 @@
+# Configuration applicative (non secrète). Les secrets et URLs d'infrastructure
+# viennent des variables d'environnement (.env), voir .env.example.
+
+project:
+  name: imdb-episode-rating
+  seed: 42
+
+data:
+  source_repo: ya0903/imdb-episode-dataset
+  source_branch: main
+  # Si vide : on résout le dernier commit de la branche (ingestion dynamique).
+  # Sinon : SHA figé pour reproduire exactement une exécution.
+  pinned_sha: ""
+  raw_dir: data/raw
+  processed_dir: data/processed
+  min_votes: 10
+
+training:
+  experiment_name: imdb-episode-rating
+  registered_model_name: imdb-episode-rating
+  test_size: 0.2
+  n_trials: 20
+  n_jobs: -1
+
+promotion:
+  # Le challenger devient champion si sa RMSE est meilleure d'au moins ce delta
+  # et sous le seuil absolu.
+  metric: rmse
+  min_improvement: 0.0
+  max_rmse: 1.0

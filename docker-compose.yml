@@ -1,0 +1,94 @@
+# Infrastructure locale de la plateforme MLOps.
+# Démarrage : docker compose up -d   (nécessite un fichier .env, voir .env.example)
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits: {memory: 512m}
+
+  mlflow:
+    <<: *restart
+    build: ./docker/mlflow
+    image: imdb-mlops/mlflow:3.18.0
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      # Désactive les workers de jobs GenAI (évaluation LLM, archivage de traces) :
+      # inutiles ici et très gourmands en mémoire.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+      MLFLOW_SERVER_JOB_ENABLE_PERIODIC_TASKS: "false"
+    command: >
+      mlflow server
+      --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow
+      --artifacts-destination /mlartifacts
+      --serve-artifacts
+      --workers 2
+      --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
+    ports: ["5000:5000"]
+    volumes: [mlflow_artifacts:/mlartifacts]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      start_period: 60s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits: {memory: 1g}
+
+  prefect-server:
+    <<: *restart
+    image: prefecthq/prefect:3.8.8-python3.12
+    depends_on:
+      postgres: {condition: service_healthy}
+    command: prefect server start --host 0.0.0.0
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
+      PREFECT_UI_API_URL: http://localhost:4200/api
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+    ports: ["4200:4200"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits: {memory: 768m}
+
+  redis:
+    <<: *restart
+    image: redis:7.4-alpine
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits: {memory: 192m}
+
+volumes:
+  pg_data:
+  mlflow_artifacts:
