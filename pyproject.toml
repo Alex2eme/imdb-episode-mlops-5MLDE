@@ -50,7 +50,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "PL", "RUF"]
-ignore = ["PLR0913", "PLR2004"]
+# PLC0415 : imports différés volontaires (CLI rapide, GX/MLflow lourds à importer)
+ignore = ["PLR0913", "PLR2004", "PLC0415"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

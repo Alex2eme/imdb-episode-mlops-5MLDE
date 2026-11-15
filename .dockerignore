@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+data
+mlruns
+mlartifacts
+**/__pycache__
+.pytest_cache
+.ruff_cache
+reports/loadtests

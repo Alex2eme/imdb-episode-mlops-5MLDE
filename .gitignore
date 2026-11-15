@@ -16,7 +16,7 @@ build/
 *.key
 
 # Données et artefacts (volumineux, régénérables par le pipeline)
-data/
+/data/
 mlruns/
 mlartifacts/
 gx/uncommitted/

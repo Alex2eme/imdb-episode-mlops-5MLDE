@@ -14,6 +14,23 @@ data:
   raw_dir: data/raw
   processed_dir: data/processed
   min_votes: 10
+  reports_dir: data/reports
+
+# Contrôles qualité : un échec « critique » interrompt la chaîne, un « warning » est
+# seulement remonté (rapport + alerte de faible sévérité).
+quality:
+  min_rows: 300000
+  max_rows: 1000000
+  min_series: 5000
+  rating_mean_range: [6.0, 9.0]
+  max_season: 500
+  max_episode: 20000
+  # Variation maximale du nombre d'épisodes par rapport au dernier snapshot validé.
+  max_row_change: 0.20
+  # Écart maximal entre le nombre d'épisodes déclaré par meta.json et celui lu.
+  max_declared_gap: 0.02
+  # Au-delà, warning : beaucoup de fichiers de séries hors meta.json.
+  max_orphan_ratio: 0.10
 
 training:
   experiment_name: imdb-episode-rating

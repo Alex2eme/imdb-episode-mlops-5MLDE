@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étape 0 (socle et infrastructure) en place. Les sections marquées 🚧 seront
+> Statut : étapes 0 (socle, infrastructure) et 1 (ingestion, contrôles qualité) en place. Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -65,6 +65,42 @@ docker compose up -d --wait   # démarre l'infrastructure
 | PostgreSQL | localhost:5432 (bases `mlflow`, `prefect`, `app`) |
 | Redis | localhost:6379 |
 
+## Chaîne données : ingestion et contrôles qualité
+
+Les traitements s'exécutent dans l'image applicative (`Dockerfile`), construite depuis
+`uv.lock` : le même environnement sert au pipeline, au worker Prefect et à l'API.
+
+```bash
+docker compose --profile jobs build pipeline
+docker compose run --rm pipeline python -m imdb_mlops data            # dernier snapshot
+docker compose run --rm pipeline python -m imdb_mlops data --ref <SHA> # snapshot figé
+```
+
+1. **Ingestion** : résolution du commit (API GitHub), téléchargement de l'archive à ce commit
+   (mise en cache par SHA), aplatissement en Parquet (une ligne par épisode) et manifeste JSON
+   (SHA, dates, volumes, empreinte SHA-256 du Parquet).
+2. **Contrôles qualité** (Great Expectations et règles métier) : un rapport JSON est écrit dans
+   `data/reports/` et le snapshot est tracé dans la table `data_snapshots`.
+
+| Niveau | Contrôles |
+|---|---|
+| Critique (bloque) | schéma exact ; pas de valeurs nulles sur les clés ; note entre 1 et 10 *(custom)* ; format `tt…` *(custom)* ; clé (série, saison, épisode) unique *(custom)* ; votes ≥ seuil source *(custom)* ; bornes saison/épisode ; volume de lignes ; nombre de séries ; **variation ≤ 20 % par rapport au dernier snapshot validé** ; **cohérence avec le nombre d'épisodes déclaré par `meta.json`** |
+| Warning (remonte) | moyenne des notes plausible ; titres présents ; ratio de fichiers orphelins |
+
+3. **En cas d'échec critique** : alerte `critical` (logs, webhook si `ALERT_WEBHOOK_URL`, table
+   `alerts`), puis arrêt avec le code de sortie 2. Aucun entraînement n'a lieu sur ce lot.
+
+### Incident contrôlé : lot invalide
+
+```bash
+docker compose run --rm pipeline python -m imdb_mlops data --fault ratings_out_of_range
+docker compose run --rm pipeline python -m imdb_mlops data --fault truncated
+```
+
+Défauts disponibles : `ratings_out_of_range`, `duplicates`, `missing_column`, `truncated`,
+`null_keys`. Le lot corrompu est enregistré sous l'identifiant `<sha>-fault-<type>`, ce qui
+n'écrase pas le snapshot sain.
+
 ## Qualité et tests
 
 ```bash
@@ -87,6 +123,15 @@ uv run pytest -m integration         # nécessite docker compose up
 - **Jobs serveur MLflow désactivés** (`MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`) : avec les
   workers GenAI activés, le serveur dépassait 768 Mo et redémarrait en boucle. Sans eux, il
   consomme environ 570 Mo.
+- **Exécution conteneurisée des traitements** : sur le poste Windows de développement, Smart
+  App Control bloque des DLL non signées de manière non déterministe (scipy, pyarrow). Les
+  traitements tournent donc dans une image Linux unique, construite depuis `uv.lock`. C'est
+  aussi la cible de production. Le `.venv` local sert au lint et aux tests unitaires.
+- **`meta.json` fait foi** : le dépôt source ne supprime pas les fichiers des séries sorties du
+  top 10 000 (10 185 fichiers pour 9 912 séries déclarées). Ces orphelins sont exclus et
+  comptés (contrôle de type warning).
+- **Deux niveaux de sévérité** : tout écart ne justifie pas d'arrêter la production. Seuls les
+  défauts qui rendraient le modèle faux ou inutilisable bloquent la chaîne.
 - **Limites mémoire par conteneur** : Docker ne dispose que d'environ 3,9 Go sur la machine de
   développement. Chaque service est borné pour qu'aucun ne puisse affamer les autres.
 
