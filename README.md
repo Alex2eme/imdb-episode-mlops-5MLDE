@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 à 4 en place (socle, données, entraînement, orchestration, API). Les sections marquées 🚧 seront
+> Statut : étapes 0 à 5 en place (socle, données, entraînement, orchestration, API, suivi J+1). Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -178,7 +178,7 @@ déploiements, dont les planifications sont versionnées avec le code. L'interfa
 | Déploiement | Déclenchement | Rôle |
 |---|---|---|
 | `watch-source` | toutes les 30 min (`WATCH_INTERVAL_S`) | Ingestion dynamique : si le dépôt source a un nouveau commit, lance la chaîne complète, sinon ne fait rien |
-| `daily-pipeline` | à la demande (UI ou CLI) | Données → qualité → entraînement → décision. Paramètres : `ref`, `fault`, `n_trials`, `train` |
+| `daily-pipeline` | à la demande (UI ou CLI) | Données → qualité → **évaluation J+1** → entraînement → décision. Paramètres : `ref`, `fault`, `n_trials`, `train` |
 
 Le déclenchement par surveillance (pull) plutôt que par une heure fixe est voulu : le dépôt
 source annonce une mise à jour à 05:00 UTC, mais ses commits ont été observés vers 12:00–12:40
@@ -259,6 +259,52 @@ curl -s localhost:8000/predict -H 'Content-Type: application/json'   -d '{"serie
 | Lot de 3 dont 1 série inconnue | 2 prédictions et 1 erreur `unknown_series`, HTTP 200 |
 | Rollback v1 → v2 dans le registre | Version 2 servie, ancien cache ignoré |
 | Redis arrêté | Toutes les requêtes en 200 et 50 à 60 ms, `/ready` indique `cache: down`, réactivation automatique au redémarrage |
+
+## Suivi en production : prédiction vs note réelle (J+1)
+
+À chaque nouveau snapshot validé, la tâche `evaluate-predictions` du flow (ou
+`python -m imdb_mlops evaluate`) recherche dans ce snapshot la note réelle de chaque
+prédiction servie sur un snapshot plus ancien
+([outcomes.py](src/imdb_mlops/monitoring/outcomes.py)) :
+
+- les résultats sont enregistrés dans `prediction_outcomes` (prédit, réel, erreur, version du
+  modèle, snapshots) ;
+- chaque prédiction est classée **nouvel épisode** (absent du snapshot qui a servi à prédire,
+  donc vraie prédiction à l'aveugle) ou **épisode connu** ;
+- les épisodes pas encore publiés restent en attente, 30 jours au plus ;
+- les métriques live (RMSE, MAE, biais, par version et par type d'épisode, sur 7 jours) sont
+  tracées dans l'expérience MLflow `imdb-episode-rating-production` ;
+- une alerte critique de **dérive** part si la RMSE live dépasse 0,8 sur au moins 20 prédictions.
+
+Les feedbacks utilisateurs (`/feedback`) offrent une seconde source de vérité terrain.
+
+### Rejeu réel J → J+1 (snapshots du 14/11 `514edeb` et du 15/11 `1e02ab7`)
+
+```bash
+R="docker compose run --rm pipeline python -m imdb_mlops"
+$R data --ref 514edebea2f29b258470d743f3161adca556a9c0        # jour J
+curl -X POST localhost:8000/admin/reload                         # API sur J (sinon < 30 s)
+$R simulate -n 400 --api-url http://api:8000    --served-sha 514edebea2f29b258470d743f3161adca556a9c0    --target-sha 1e02ab7c027c48274aca22eb04244a849f909ae7       # trafic (dont nouveaux épisodes)
+$R data --ref 1e02ab7c027c48274aca22eb04244a849f909ae7        # jour J+1
+$R evaluate
+```
+
+| | n | MAE | RMSE | Biais |
+|---|---|---|---|---|
+| Épisodes connus | 251 | 0,338 | 0,453 | +0,008 |
+| **Nouveaux épisodes** | **174** | **0,572** | **0,722** | **−0,073** |
+| Ensemble (live) | 425 | 0,434 | 0,578 | −0,025 |
+| Rappel : test hors ligne | 88 001 | 0,393 | 0,570 | |
+
+- 82 prédictions portent sur des épisodes futurs et restent en attente. Les feedbacks (62)
+  montrent une MAE de 0,451.
+- **Lecture** : la RMSE live globale (0,578) est en ligne avec le test (0,570), il n'y a donc
+  pas de dérive. En revanche, les nouveaux épisodes sont nettement plus difficiles et
+  sous-estimés. Les plus grosses erreurs concernent des épisodes tout juste sortis, notés
+  9 à 9,5 par les premiers votants. C'est une limite connue : la note d'un épisode récent est
+  instable pendant ses premiers jours.
+- Les 37 requêtes en 404 correspondent à des séries entrées dans le top 10 000 le 15/11,
+  inconnues de l'API servie avec J. C'est le comportement attendu.
 
 ## Qualité et tests
 

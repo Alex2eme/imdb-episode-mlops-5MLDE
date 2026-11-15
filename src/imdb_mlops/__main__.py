@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from imdb_mlops.config import load_config
@@ -49,11 +50,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912 (une b
     p_rb.add_argument("--version", help="Version cible (défaut : previous_champion)")
     p_rb.add_argument("--reason", default="", help="Motif, tracé dans le registre")
 
+    p_eval = sub.add_parser(
+        "evaluate",
+        help="Compare les prédictions passées aux notes "
+        "publiées dans un snapshot plus récent (J+1)",
+    )
+    p_eval.add_argument("--sha", help="Snapshot de référence (défaut : dernier validé)")
+
+    p_sim = sub.add_parser("simulate", help="Simule du trafic sur l'API (démonstration)")
+    p_sim.add_argument("-n", type=int, default=300, help="Nombre de requêtes")
+    p_sim.add_argument("--api-url", default=os.environ.get("API_URL", "http://localhost:8000"))
+    p_sim.add_argument("--served-sha", help="Snapshot servi par l'API (défaut : dernier validé)")
+    p_sim.add_argument("--target-sha", help="Snapshot J+1 : fournit les nouveaux épisodes")
+    p_sim.add_argument("--seed", type=int, default=0)
+
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
     cfg = load_config(args.config)
 
-    if args.command in {"train", "reproduce", "rollback"}:
+    if args.command in {"train", "reproduce", "rollback", "evaluate"}:
         from imdb_mlops import db
 
         try:
@@ -119,6 +134,22 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912 (une b
                 f"data={r['data_sha']} code={r['git_sha']} {r['created']}\n"
                 f"     {r['reason']}"
             )
+        return 0
+
+    if args.command == "evaluate":
+        from imdb_mlops.monitoring.outcomes import evaluate_predictions
+
+        summary = evaluate_predictions(cfg, args.sha)
+        for k, v in summary.items():
+            print(f"{k:18} {v}")
+        return 0
+
+    if args.command == "simulate":
+        from imdb_mlops.monitoring.simulate import simulate
+
+        stats = simulate(args.api_url, args.n, args.served_sha, args.target_sha, seed=args.seed)
+        for k, v in stats.items():
+            print(f"{k:24} {v}")
         return 0
 
     if args.command == "rollback":

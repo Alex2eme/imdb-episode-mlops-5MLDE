@@ -64,3 +64,14 @@ promotion:
   # 0.005 : en dessous, l'écart relève du bruit (observé : 0.0014 entre deux tunings) et
   # changer de modèle en production n'apporte que du risque.
   min_improvement: 0.005
+
+# Suivi en production : comparaison des prédictions aux notes publiées ensuite (J+1).
+monitoring:
+  # Alerte si la RMSE « live » dépasse ce seuil (sur au moins min_samples prédictions).
+  max_live_rmse: 0.8
+  min_samples: 20
+  # Fenêtre d'agrégation des métriques live.
+  window_days: 7
+  # Au-delà, une prédiction d'épisode jamais publié n'est plus attendue.
+  pending_max_days: 30
+  experiment_name: imdb-episode-rating-production

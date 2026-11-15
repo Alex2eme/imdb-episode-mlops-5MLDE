@@ -60,12 +60,21 @@ class PromotionConfig(BaseModel):
     min_improvement: float = 0.0
 
 
+class MonitoringConfig(BaseModel):
+    max_live_rmse: float = 0.8
+    min_samples: int = Field(20, ge=1)
+    window_days: int = Field(7, ge=1)
+    pending_max_days: int = Field(30, ge=1)
+    experiment_name: str = "imdb-episode-rating-production"
+
+
 class AppConfig(BaseModel):
     project: ProjectConfig
     data: DataConfig
     quality: QualityConfig
     training: TrainingConfig
     promotion: PromotionConfig
+    monitoring: MonitoringConfig = MonitoringConfig()
 
 
 class Settings(BaseSettings):

@@ -140,6 +140,29 @@ api_requests = Table(
 )
 
 
+# Comparaison prédiction → note réelle publiée dans un snapshot ultérieur (J+1).
+prediction_outcomes = Table(
+    "prediction_outcomes",
+    metadata,
+    Column("prediction_id", String(36), primary_key=True),
+    Column("predicted_at", DateTime(timezone=True), nullable=False),
+    Column("evaluated_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("series_id", String(16), nullable=False),
+    Column("season", Integer, nullable=False),
+    Column("episode", Integer, nullable=False),
+    Column("predicted_rating", Float, nullable=False),
+    Column("actual_rating", Float, nullable=False),
+    Column("actual_votes", Integer),
+    Column("error", Float, nullable=False),  # prédit - réel
+    Column("abs_error", Float, nullable=False),
+    # Épisode absent du snapshot ayant servi à la prédiction : vraie prédiction « à l'aveugle ».
+    Column("is_new_episode", Boolean, nullable=False),
+    Column("model_version", String(16)),
+    Column("prediction_data_sha", String(80)),
+    Column("actual_data_sha", String(80)),
+)
+
+
 @lru_cache
 def get_engine() -> Engine:
     return create_engine(

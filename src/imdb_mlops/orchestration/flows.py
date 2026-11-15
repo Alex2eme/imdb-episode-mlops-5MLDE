@@ -158,6 +158,25 @@ def train_and_promote(snapshot_sha: str, n_trials: int | None = None) -> dict:
     }
 
 
+@task(
+    name="evaluate-predictions",
+    retries=2,
+    retry_delay_seconds=30,
+    retry_condition_fn=_is_transient,
+    timeout_seconds=600,
+    cache_policy=NO_CACHE,
+)
+def evaluate_predictions_task(actual_sha: str) -> dict:
+    """Compare les prédictions passées aux notes publiées dans ce snapshot (J+1)."""
+    from imdb_mlops.monitoring.outcomes import evaluate_predictions
+
+    with track_step("daily-pipeline", "evaluate-predictions") as details:
+        summary = evaluate_predictions(load_config(), actual_sha)
+        details.update(summary)
+    get_run_logger().info("Évaluation J+1 : %s", summary)
+    return summary
+
+
 @task(name="resolve-source-commit", retries=3, retry_delay_seconds=30, cache_policy=NO_CACHE)
 def resolve_source_commit() -> str:
     from imdb_mlops.data.ingest import resolve_commit
@@ -182,14 +201,23 @@ def daily_pipeline(
     n_trials: int | None = None,
     train: bool = True,
 ) -> dict:
-    """Ingestion + contrôles qualité, puis entraînement et décision de mise en service.
+    """Ingestion + contrôles qualité, évaluation J+1 des prédictions passées, puis
+    entraînement et décision de mise en service.
 
     Un lot non conforme interrompt le flow avant l'entraînement.
     """
     snapshot = ingest_and_validate(ref=ref, fault=fault)
-    if not train:
-        return {"snapshot": snapshot}
-    return {"snapshot": snapshot, "model": train_and_promote(snapshot["sha"], n_trials)}
+    # L'évaluation J+1 est utile mais non bloquante : son échec n'empêche pas l'entraînement.
+    evaluation = evaluate_predictions_task(snapshot["sha"], return_state=True)
+    result = {
+        "snapshot": snapshot,
+        "evaluation": evaluation.result(raise_on_failure=False)
+        if evaluation.is_completed()
+        else {"error": str(evaluation.message)},
+    }
+    if train:
+        result["model"] = train_and_promote(snapshot["sha"], n_trials)
+    return result
 
 
 @flow(name="watch-source", on_failure=[_alert_flow_failure])
