@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 (socle), 1 (ingestion, qualité), 2 (entraînement, registre) et 3 (orchestration) en place. Les sections marquées 🚧 seront
+> Statut : étapes 0 à 4 en place (socle, données, entraînement, orchestration, API). Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -61,6 +61,7 @@ docker compose up -d --wait   # démarre l'infrastructure
 | Service | URL |
 |---|---|
 | MLflow | http://localhost:5000 |
+| API (documentation interactive) | http://localhost:8000/docs |
 | Prefect | http://localhost:4200 |
 | PostgreSQL | localhost:5432 (bases `mlflow`, `prefect`, `app`) |
 | Redis | localhost:6379 |
@@ -209,6 +210,56 @@ docker compose exec worker prefect deployment run daily-pipeline/daily-pipeline 
 | Dépendance indisponible avec reprise | `docker compose stop mlflow`, puis lancement du flow, puis `docker compose start mlflow` pendant le délai de relance | Échec de l'entraînement (`MlflowException`), `AwaitingRetry`, relance 60 s plus tard réussie, flow en `Completed` |
 | Dépendance durablement indisponible | `docker compose stop mlflow`, puis lancement du flow | *Attendu, pas encore exécuté* : 3 tentatives (environ 5 min), puis flow en `Failed` et alerte critique |
 
+## API de prédiction
+
+FastAPI ([app.py](src/imdb_mlops/api/app.py)), servie par uvicorn. Le nombre de workers, les
+CPU, la mémoire et le cache se règlent par variables d'environnement (`API_WORKERS`,
+`API_CPUS`, `API_MEMORY`, `CACHE_ENABLED`).
+
+| Endpoint | Rôle |
+|---|---|
+| `POST /predict` | Note d'un épisode (existant ou futur) d'une série connue |
+| `POST /predict/batch` | 1 à 1000 épisodes ; **succès partiel** (éléments en erreur listés à part) |
+| `POST /feedback` | Note observée pour une `prediction_id` (évaluation en production) |
+| `GET /model` | Version servie, run MLflow, SHA des données, RMSE |
+| `GET /health`, `GET /ready` | Liveness ; readiness (modèle chargé, état du cache) |
+| `POST /admin/reload` | Force la relecture du champion (sinon automatique toutes les 30 s) |
+| `GET /metrics` | Métriques Prometheus (multi-workers) |
+
+```bash
+curl -s localhost:8000/predict -H 'Content-Type: application/json'   -d '{"series_id": "tt0903747", "season": 5, "episode": 16}'
+# {"prediction_id": "...", "predicted_rating": 9.354, "model_version": "1", "cached": false, ...}
+```
+
+- **Version identifiée** : chaque réponse contient `model_version` et l'en-tête
+  `X-Model-Version`. Chaque requête reçoit un `X-Request-ID`, repris dans les erreurs et les
+  traces.
+- **Validation et erreurs** : schémas pydantic stricts (format `tt…`, bornes, champs inconnus
+  refusés) et format d'erreur unique `{error, message, request_id, details}`. Codes :
+  `invalid_input` (422), `unknown_series` (404), `prediction_not_found` (404),
+  `model_unavailable` (503), `storage_unavailable` (503), `internal_error` (500).
+- **Mise en service à chaud** : l'API sert toujours l'alias `champion`. Une promotion ou un
+  rollback est pris en compte en 30 s au plus, sans redémarrage.
+- **Mode dégradé** : si MLflow est injoignable au démarrage, l'API démarre quand même,
+  `/ready` et `/predict` répondent 503, et le chargement est retenté en arrière-plan.
+- **Cache Redis** : la clé contient la version du modèle et le SHA des données, ce qui invalide
+  le cache automatiquement à chaque changement. Redis est optionnel : timeouts de 50 ms,
+  coupe-circuit et sonde en arrière-plan.
+- **Traces** (PostgreSQL, écriture asynchrone par lots, sans latence ajoutée) :
+  - `predictions` : entrée, note, version, run, données, cache, latence, statut, erreur ;
+  - `api_requests` : chemin, code HTTP, durée, erreur, version, worker ;
+  - `feedback`.
+
+### Vérifications faites sur l'API réelle
+
+| Cas | Résultat |
+|---|---|
+| Breaking Bad S5E16 (note IMDb : 9,9) | 9,354, 218 ms au 1er appel, **0,7 ms** au 2e (cache) |
+| Appels non cachés | 44 à 70 ms (calcul des features avec pandas) |
+| Lot de 3 dont 1 série inconnue | 2 prédictions et 1 erreur `unknown_series`, HTTP 200 |
+| Rollback v1 → v2 dans le registre | Version 2 servie, ancien cache ignoré |
+| Redis arrêté | Toutes les requêtes en 200 et 50 à 60 ms, `/ready` indique `cache: down`, réactivation automatique au redémarrage |
+
 ## Qualité et tests
 
 ```bash
@@ -254,6 +305,13 @@ uv run pytest -m integration         # nécessite docker compose up
   incompatibles avec un budget Docker de 3,9 Go.
 - **Features vectorisées** : la moyenne glissante calculée série par série prenait 40 à 50 s
   dans le worker. En version vectorisée, il faut 3,5 s pour 421 000 épisodes.
+- **Rétablissement de Redis vérifié en arrière-plan** : un premier essai rétablissait le cache
+  lors d'une requête utilisateur. Avec le conteneur Redis arrêté, la seule résolution DNS de
+  `redis` bloquait cette requête de 4 à 30 s, ce que les timeouts de socket ne couvrent pas. Une
+  sonde de fond détecte maintenant la panne et le retour de Redis, et aucune requête n'attend.
+- **Traces écrites hors du chemin de réponse** : une file bornée et un thread d'insertion par
+  lots. Une base lente ou en panne ne ralentit pas l'API : les traces perdues sont comptées
+  (`db_traces_dropped_total`).
 - **Limites mémoire par conteneur** : Docker ne dispose que d'environ 3,9 Go sur la machine de
   développement. Chaque service est borné pour qu'aucun ne puisse affamer les autres.
 

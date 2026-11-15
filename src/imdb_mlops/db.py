@@ -92,6 +92,54 @@ model_events = Table(
 )
 
 
+# --- Traces d'utilisation de l'API ---------------------------------------------------
+
+predictions = Table(
+    "predictions",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("request_id", String(64)),
+    Column("endpoint", String(16), nullable=False),  # single | batch
+    Column("series_id", String(16), nullable=False, index=True),
+    Column("season", Integer, nullable=False),
+    Column("episode", Integer, nullable=False),
+    Column("predicted_rating", Float),
+    Column("model_version", String(16)),
+    Column("model_run_id", String(64)),
+    Column("data_sha", String(80)),
+    Column("latency_ms", Float),
+    Column("cached", Boolean),
+    Column("status", String(16), nullable=False),  # ok | error
+    Column("error", String(64)),
+)
+
+feedback = Table(
+    "feedback",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("prediction_id", String(64), nullable=False, index=True),
+    Column("rating", Float, nullable=False),
+    Column("comment", Text),
+)
+
+api_requests = Table(
+    "api_requests",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("request_id", String(64)),
+    Column("method", String(8), nullable=False),
+    Column("path", String(200), nullable=False),
+    Column("status_code", Integer, nullable=False),
+    Column("duration_ms", Float, nullable=False),
+    Column("error", String(64)),
+    Column("model_version", String(16)),
+    Column("worker_pid", Integer),
+)
+
+
 @lru_cache
 def get_engine() -> Engine:
     return create_engine(

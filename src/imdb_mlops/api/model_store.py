@@ -1,0 +1,149 @@
+"""Chargement du modèle champion et de l'historique des séries, avec rechargement à chaud.
+
+Le modèle servi est toujours celui portant l'alias `champion` dans le registre MLflow :
+une promotion ou un rollback est pris en compte sans redémarrer l'API (vérification
+périodique). L'historique provient du dernier snapshot validé (le plus récent).
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+import numpy as np
+import pandas as pd
+
+from imdb_mlops import db
+from imdb_mlops.config import ROOT_DIR, AppConfig
+from imdb_mlops.features import FEATURES, features_for
+
+log = logging.getLogger(__name__)
+
+
+class ModelUnavailableError(RuntimeError):
+    """Aucun modèle chargé (registre injoignable au démarrage, pas de champion...)."""
+
+
+class UnknownSeriesError(KeyError):
+    pass
+
+
+@dataclass(frozen=True)
+class Loaded:
+    model: object
+    name: str
+    version: str
+    run_id: str
+    rmse: float | None
+    data_sha: str
+    history: dict[str, pd.DataFrame]
+    loaded_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+def _load_history(sha: str | None = None) -> tuple[str, dict[str, pd.DataFrame]]:
+    snap = db.get_snapshot(sha) if sha else db.last_valid_snapshot()
+    if snap is None:
+        raise ModelUnavailableError("Aucun snapshot validé pour l'historique des séries")
+    df = pd.read_parquet(ROOT_DIR / snap["parquet_path"])
+    cols = ["series_id", "series_votes", "season", "episode", "rating", "votes"]
+    history = {sid: g.reset_index(drop=True) for sid, g in df[cols].groupby("series_id")}
+    return snap["sha"], history
+
+
+class ModelStore:
+    def __init__(self, cfg: AppConfig):
+        self.cfg = cfg
+        self._loaded: Loaded | None = None
+        self._lock = threading.Lock()
+        self.last_error: str | None = None
+
+    @property
+    def current(self) -> Loaded:
+        if self._loaded is None:
+            raise ModelUnavailableError(self.last_error or "Modèle non chargé")
+        return self._loaded
+
+    @property
+    def ready(self) -> bool:
+        return self._loaded is not None
+
+    def set(self, loaded: Loaded) -> None:
+        """Remplacement atomique (utilisé aussi par les tests)."""
+        self._loaded = loaded
+
+    def refresh(self, force: bool = False) -> bool:
+        """Recharge si le champion ou le dernier snapshot validé a changé.
+
+        Retourne True si un rechargement a eu lieu. N'interrompt jamais le service : en cas
+        d'erreur, l'ancien modèle reste servi.
+        """
+        import mlflow
+        from mlflow import MlflowClient
+
+        name = self.cfg.training.registered_model_name
+        with self._lock:
+            try:
+                champ = MlflowClient().get_model_version_by_alias(name, "champion")
+                latest = db.last_valid_snapshot()
+                cur = self._loaded
+                same_model = cur is not None and cur.version == str(champ.version)
+                same_data = cur is not None and latest is not None and cur.data_sha == latest["sha"]
+                if same_model and same_data and not force:
+                    return False
+                model = (
+                    cur.model
+                    if same_model and not force
+                    else mlflow.lightgbm.load_model(f"models:/{name}/{champ.version}")
+                )
+                if same_data and not force:
+                    sha, history = cur.data_sha, cur.history
+                else:
+                    sha, history = _load_history()
+                rmse = champ.tags.get("rmse")
+                self._loaded = Loaded(
+                    model=model,
+                    name=name,
+                    version=str(champ.version),
+                    run_id=champ.run_id,
+                    rmse=float(rmse) if rmse else None,
+                    data_sha=sha,
+                    history=history,
+                )
+                self.last_error = None
+                log.info(
+                    "Modèle servi : %s v%s (données %s, %d séries)",
+                    name,
+                    champ.version,
+                    sha[:10],
+                    len(history),
+                )
+                return True
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                log.error(
+                    "Rechargement impossible, modèle précédent conservé : %s", self.last_error
+                )
+                return False
+
+    def predict(self, refs: list[tuple[str, int, int]]) -> tuple[np.ndarray, list[str | None]]:
+        """Prédit pour une liste (series_id, season, episode).
+
+        Retourne les prédictions (NaN si erreur) et, par élément, le code d'erreur éventuel.
+        Les features de tout le lot sont assemblées puis prédites en un seul appel.
+        """
+        loaded = self.current
+        rows, errors, ok_idx = [], [None] * len(refs), []
+        for i, (sid, season, episode) in enumerate(refs):
+            history = loaded.history.get(sid)
+            if history is None:
+                errors[i] = "unknown_series"
+                continue
+            rows.append(features_for(history, season, episode))
+            ok_idx.append(i)
+        preds = np.full(len(refs), np.nan)
+        if rows:
+            X = pd.concat(rows, ignore_index=True)[FEATURES]
+            preds[ok_idx] = np.clip(loaded.model.predict(X), 1.0, 10.0)
+        return preds, errors
