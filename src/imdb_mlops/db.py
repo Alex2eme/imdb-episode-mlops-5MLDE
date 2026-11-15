@@ -75,6 +75,23 @@ pipeline_steps = Table(
 )
 
 
+model_events = Table(
+    "model_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("event", String(32), nullable=False),  # registered|promoted|rejected|rollback
+    Column("model_name", String(200), nullable=False),
+    Column("version", String(16), nullable=False),
+    Column("run_id", String(64)),
+    Column("data_sha", String(80)),
+    Column("rmse", Float),
+    Column("champion_rmse", Float),
+    Column("baseline_rmse", Float),
+    Column("reason", Text),
+)
+
+
 @lru_cache
 def get_engine() -> Engine:
     return create_engine(
@@ -181,3 +198,15 @@ def record_step(
                 details=details or {},
             )
         )
+
+
+def get_snapshot(sha: str) -> dict | None:
+    with get_engine().connect() as conn:
+        row = conn.execute(select(data_snapshots).where(data_snapshots.c.sha == sha)).mappings()
+        row = row.first()
+    return dict(row) if row else None
+
+
+def record_model_event(**values) -> None:
+    with get_engine().begin() as conn:
+        conn.execute(model_events.insert().values(created_at=datetime.now(UTC), **values))

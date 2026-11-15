@@ -5,7 +5,7 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 (socle, infrastructure) et 1 (ingestion, contrôles qualité) en place. Les sections marquées 🚧 seront
+> Statut : étapes 0 (socle), 1 (ingestion, qualité) et 2 (entraînement, registre) en place. Les sections marquées 🚧 seront
 > complétées au fil des étapes.
 
 ## Données
@@ -71,7 +71,7 @@ Les traitements s'exécutent dans l'image applicative (`Dockerfile`), construite
 `uv.lock` : le même environnement sert au pipeline, au worker Prefect et à l'API.
 
 ```bash
-docker compose --profile jobs build pipeline
+GIT_SHA=$(git rev-parse HEAD) docker compose --profile jobs build pipeline   # SHA du code intégré
 docker compose run --rm pipeline python -m imdb_mlops data            # dernier snapshot
 docker compose run --rm pipeline python -m imdb_mlops data --ref <SHA> # snapshot figé
 ```
@@ -101,11 +101,79 @@ Défauts disponibles : `ratings_out_of_range`, `duplicates`, `missing_column`, `
 `null_keys`. Le lot corrompu est enregistré sous l'identifiant `<sha>-fault-<type>`, ce qui
 n'écrase pas le snapshot sain.
 
+## Entraînement, traçabilité et registre
+
+```bash
+docker compose run --rm pipeline python -m imdb_mlops train              # dernier snapshot validé
+docker compose run --rm pipeline python -m imdb_mlops train --sha <SHA>  # snapshot précis
+docker compose run --rm pipeline python -m imdb_mlops models             # versions et alias
+docker compose run --rm pipeline python -m imdb_mlops rollback           # retour au champion précédent
+docker compose run --rm pipeline python -m imdb_mlops reproduce <RUN_ID> # rejoue un run
+```
+
+**Modèle** : LightGBM (régression de la note). Les features ne décrivent que **l'historique de
+la série avant l'épisode** : moyenne et écart-type des notes précédentes, note de l'épisode
+précédent, moyenne glissante sur 3 épisodes, tendance, moyenne de la saison en cours, position
+dans la série et dans la saison, popularité de la série. Le nombre de votes de l'épisode
+lui-même est exclu, car il n'est connu qu'après diffusion. Une seule fonction
+([features.py](src/imdb_mlops/features.py)) sert à l'entraînement et à l'API, et un test
+vérifie que les deux produisent exactement les mêmes valeurs.
+
+**Évaluation** : split temporel par série. Les 20 % derniers épisodes de chaque série forment le
+test, ce qui correspond au cas d'usage réel : prédire la suite d'une série à partir de son passé.
+Référence de comparaison (baseline) : la moyenne des épisodes précédents de la série.
+
+**Parallélisation** : Optuna lance `parallel_trials` trials simultanés, chacun avec
+`threads_per_trial` threads LightGBM (4 × 3 = 12 cœurs). Le modèle final utilise tous les cœurs.
+
+**Tracé dans MLflow pour chaque run** :
+
+| Catégorie | Contenu |
+|---|---|
+| Données | SHA du snapshot, URL source au commit, SHA-256 du Parquet, dataset (`log_input`), rapport qualité |
+| Code | SHA Git (`GIT_SHA` intégré à l'image), indicateur de modifications non commitées, version du paquet |
+| Paramètres | seed, splits, configuration complète (artefact), hyperparamètres retenus (`hp_*`) |
+| Métriques | RMSE/MAE/R² en test, baselines, RMSE par segment (premier épisode de saison, longueur d'historique), courbe d'apprentissage, durées de chaque phase |
+| Tuning | un run enfant par trial Optuna (paramètres, RMSE de validation, durée) |
+| Artefacts | importance des features, prédit vs réel, résidus, historique Optuna, échantillon de prédictions, modèle avec signature |
+
+**Règle de mise en service** ([registry.py](src/imdb_mlops/training/registry.py)) : chaque
+nouvelle version reçoit l'alias `challenger`. Elle devient `champion` seulement si elle respecte
+trois conditions : RMSE sous le plafond `max_rmse`, meilleure que la baseline, et meilleure que
+le champion actuel **réévalué sur le même jeu de test**, d'au moins `min_improvement`.
+L'ancien champion reçoit l'alias `previous_champion`, ce qui rend le rollback immédiat. Chaque
+décision est enregistrée de trois façons : tag sur la version, table `model_events` et alerte.
+
+**Reproductibilité** : `reproduce <RUN_ID>` relit le SHA des données et les hyperparamètres
+d'un run, puis réentraîne avec la même seed. La commande échoue (code 4) si la RMSE diffère.
+Note : avec des trials parallèles, l'ordre des trials Optuna n'est pas déterministe. On
+reproduit donc le *modèle* à partir des hyperparamètres retenus, pas le chemin de recherche.
+
+### Résultats du run de référence (snapshot `1e02ab7c02`)
+
+| | RMSE test | MAE | R² |
+|---|---|---|---|
+| Moyenne globale | 1,068 | 0,785 | 0,00 |
+| Baseline (moyenne des épisodes précédents) | 0,741 | 0,516 | 0,52 |
+| **LightGBM v1 (30 trials)** | **0,570** | **0,393** | **0,71** |
+
+- **RMSE par segment** : premier épisode de saison 0,856 (le plus difficile), épisodes en
+  cours de saison 0,556. Historique court (< 10 épisodes) 0,472, historique long (≥ 50) 0,606 :
+  les séries longues dérivent davantage.
+- **Durées** (10 cœurs) : features 10 s, tuning de 30 trials 269 s, modèle final 13 s, total 332 s.
+- **Décisions du registre observées** :
+  - v1 promu (aucun champion) ;
+  - v2 promu (gain de 0,0014, avec `min_improvement=0`) ;
+  - rollback de v2 vers v1 ;
+  - `min_improvement` relevé à 0,005, puis v3 rejeté (gain de 0,0015, considéré comme du bruit).
+- **Reproduction** du run v1 : écart de RMSE de 0,0.
+
 ## Qualité et tests
 
 ```bash
 uv run ruff check . && uv run ruff format --check .
-uv run pytest -m "not integration"   # tests unitaires
+uv run pytest -m "not integration"   # tests unitaires (poste Linux/macOS, CI)
+docker compose run --rm pipeline pytest -m "not integration"   # mêmes tests, dans l'image
 uv run pytest -m integration         # nécessite docker compose up
 ```
 
@@ -132,6 +200,13 @@ uv run pytest -m integration         # nécessite docker compose up
   comptés (contrôle de type warning).
 - **Deux niveaux de sévérité** : tout écart ne justifie pas d'arrêter la production. Seuls les
   défauts qui rendraient le modèle faux ou inutilisable bloquent la chaîne.
+- **Le tuning plafonné à 10 cœurs sur 12** : à 12 cœurs, le serveur MLflow, privé de CPU,
+  coupait des connexions (*connection reset*) pendant le tuning. Le conteneur `pipeline` est
+  limité à 10 CPU (5 trials × 2 threads), le keep-alive d'uvicorn côté MLflow passe à 120 s, et
+  le traçage d'un trial est retenté puis ignoré en cas d'échec : un problème de traçage ne fait
+  pas échouer un entraînement.
+- **Seuil de promotion à 0,005** : deux tunings sur les mêmes données diffèrent d'environ
+  0,0015 de RMSE. Promouvoir sur un tel écart remplacerait le modèle en production sans gain réel.
 - **Limites mémoire par conteneur** : Docker ne dispose que d'environ 3,9 Go sur la machine de
   développement. Chaque service est borné pour qu'aucun ne puisse affamer les autres.
 

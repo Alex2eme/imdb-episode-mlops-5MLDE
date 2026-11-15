@@ -44,14 +44,20 @@ class TrainingConfig(BaseModel):
     experiment_name: str
     registered_model_name: str
     test_size: float = Field(0.2, gt=0, lt=1)
-    n_trials: int = Field(20, ge=1)
-    n_jobs: int = -1
+    val_size: float = Field(0.1, gt=0, lt=1)
+    n_estimators: int = Field(1000, ge=1)
+    early_stopping_rounds: int = Field(50, ge=1)
+    n_trials: int = Field(20, ge=0)
+    parallel_trials: int = Field(4, ge=1)
+    threads_per_trial: int = Field(3, ge=1)
+    search_space: dict[str, tuple[float, float]]
 
 
 class PromotionConfig(BaseModel):
     metric: str = "rmse"
-    min_improvement: float = 0.0
+    must_beat_baseline: bool = True
     max_rmse: float = 1.0
+    min_improvement: float = 0.0
 
 
 class AppConfig(BaseModel):

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Image applicative unique : pipeline (ingestion, qualité, entraînement), worker Prefect,
 # API et tests. Les dépendances viennent de uv.lock : environnement identique partout.
 FROM python:3.12-slim
@@ -15,18 +16,20 @@ ENV UV_COMPILE_BYTECODE=1 \
     PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \
-    GX_ANALYTICS_ENABLED=False
+    GX_ANALYTICS_ENABLED=False \
+    GIT_PYTHON_REFRESH=quiet
 
 WORKDIR /app
 
 # Couche dépendances (mise en cache tant que uv.lock ne change pas).
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --locked --no-install-project
+# Cache uv persistant entre builds : une modification de pyproject.toml ne retélécharge pas tout.
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-install-project
 
 COPY src ./src
 COPY configs ./configs
 COPY tests ./tests
-RUN uv sync --locked
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked
 
 # Version du code embarquée dans l'image, remontée dans MLflow et l'API.
 ARG GIT_SHA=unknown

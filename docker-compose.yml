@@ -42,6 +42,7 @@ services:
       --artifacts-destination /mlartifacts
       --serve-artifacts
       --workers 2
+      --uvicorn-opts "--timeout-keep-alive 120"
       --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
     ports: ["5000:5000"]
     volumes: [mlflow_artifacts:/mlartifacts]
@@ -112,7 +113,8 @@ services:
       - ./data:/app/data
     deploy:
       resources:
-        limits: {memory: 2g}
+        # 10 cœurs sur 12 : l'entraînement ne doit pas affamer MLflow/PostgreSQL.
+        limits: {memory: 2g, cpus: "10"}
 
 volumes:
   pg_data:

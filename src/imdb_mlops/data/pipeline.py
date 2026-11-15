@@ -41,8 +41,9 @@ def run_data_step(
         manifest.sha = f"{manifest.sha}-fault-{fault}"
         manifest.n_rows = len(df)
 
-    previous = _try("Lecture du snapshot de référence", db.last_valid_snapshot,
-                    exclude_sha=manifest.sha)
+    previous = _try(
+        "Lecture du snapshot de référence", db.last_valid_snapshot, exclude_sha=manifest.sha
+    )
     report = validate(
         df,
         manifest,

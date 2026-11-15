@@ -12,6 +12,7 @@ le manifeste source), que GX n'exprime pas directement.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -25,8 +26,8 @@ from imdb_mlops.config import ROOT_DIR, AppConfig
 from imdb_mlops.data.ingest import EPISODE_COLUMNS, SnapshotManifest
 
 os.environ.setdefault("GX_ANALYTICS_ENABLED", "False")
-import great_expectations as gx  # noqa: E402
-import great_expectations.expectations as gxe  # noqa: E402
+import great_expectations as gx
+import great_expectations.expectations as gxe
 
 log = logging.getLogger(__name__)
 
@@ -146,10 +147,8 @@ def _build_suite(cfg: AppConfig) -> tuple[list, list]:
 
 def _run_gx(df: pd.DataFrame, expectations: list, severity: str) -> list[CheckResult]:
     context = gx.get_context(mode="ephemeral")
-    try:
+    with contextlib.suppress(Exception):  # option purement cosmétique
         context.variables.progress_bars = {"globally": False}
-    except Exception:  # option purement cosmétique
-        pass
     batch_def = (
         context.data_sources.add_pandas(f"src_{severity}")
         .add_dataframe_asset("episodes")
@@ -174,8 +173,11 @@ def _run_gx(df: pd.DataFrame, expectations: list, severity: str) -> list[CheckRe
         if message := _exception_message(r.exception_info):
             details["exception"] = message
         name = f"{cfg.type}({column})" if column else cfg.type
-        checks.append(CheckResult(name=name, success=bool(r.success), severity=severity,
-                                  details=_jsonable(details)))
+        checks.append(
+            CheckResult(
+                name=name, success=bool(r.success), severity=severity, details=_jsonable(details)
+            )
+        )
     return checks
 
 
@@ -197,8 +199,12 @@ def _business_checks(
                 "row_count_change_vs_previous_snapshot",
                 abs(change) <= q.max_row_change,
                 "critical",
-                {"previous": previous_n_rows, "current": len(df), "change": round(change, 4),
-                 "max_change": q.max_row_change},
+                {
+                    "previous": previous_n_rows,
+                    "current": len(df),
+                    "change": round(change, 4),
+                    "max_change": q.max_row_change,
+                },
             )
         )
 

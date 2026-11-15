@@ -35,13 +35,32 @@ quality:
 training:
   experiment_name: imdb-episode-rating
   registered_model_name: imdb-episode-rating
+  # Part des derniers épisodes de chaque série réservée au test (split temporel).
   test_size: 0.2
-  n_trials: 20
-  n_jobs: -1
+  # Part de l'entraînement utilisée pour l'early stopping et le tuning.
+  val_size: 0.1
+  n_estimators: 1000
+  early_stopping_rounds: 50
+  # Recherche d'hyperparamètres : trials en parallèle × threads LightGBM par trial.
+  # 5 × 2 = 10 cœurs = limite CPU du conteneur pipeline (docker-compose.yml).
+  n_trials: 30
+  parallel_trials: 5
+  threads_per_trial: 2
+  search_space:
+    num_leaves: [15, 255]
+    learning_rate: [0.02, 0.2]
+    min_child_samples: [10, 300]
+    colsample_bytree: [0.5, 1.0]
+    subsample: [0.5, 1.0]
+    reg_lambda: [0.0, 10.0]
 
 promotion:
-  # Le challenger devient champion si sa RMSE est meilleure d'au moins ce delta
-  # et sous le seuil absolu.
   metric: rmse
-  min_improvement: 0.0
+  # Le challenger doit battre la baseline « moyenne des épisodes précédents »...
+  must_beat_baseline: true
+  # ... rester sous un plafond absolu...
   max_rmse: 1.0
+  # ... et améliorer le champion actuel (évalué sur le même jeu de test) d'au moins ce delta.
+  # 0.005 : en dessous, l'écart relève du bruit (observé : 0.0014 entre deux tunings) et
+  # changer de modèle en production n'apporte que du risque.
+  min_improvement: 0.005
