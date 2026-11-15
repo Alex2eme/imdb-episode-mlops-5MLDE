@@ -207,7 +207,7 @@ docker compose exec worker prefect deployment run daily-pipeline/daily-pipeline 
 |---|---|---|
 | Lot invalide | `... daily-pipeline -p fault=duplicates` | Tâche des données en `Failed`, **aucune relance**, entraînement non lancé, 2 alertes critiques (qualité et flow) |
 | Dépendance indisponible avec reprise | `docker compose stop mlflow`, puis lancement du flow, puis `docker compose start mlflow` pendant le délai de relance | Échec de l'entraînement (`MlflowException`), `AwaitingRetry`, relance 60 s plus tard réussie, flow en `Completed` |
-| Dépendance durablement indisponible | `docker compose stop mlflow`, puis lancement du flow | 3 tentatives, puis flow en `Failed` et alerte critique |
+| Dépendance durablement indisponible | `docker compose stop mlflow`, puis lancement du flow | *Attendu, pas encore exécuté* : 3 tentatives (environ 5 min), puis flow en `Failed` et alerte critique |
 
 ## Qualité et tests
 
