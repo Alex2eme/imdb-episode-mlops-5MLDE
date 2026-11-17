@@ -228,6 +228,15 @@ async def unexpected_handler(request: Request, exc: Exception):
 # --- Prédiction ------------------------------------------------------------------------
 
 
+TRAFFIC_SOURCES = {"user", "simulation", "loadtest"}
+
+
+def _traffic_source(request: Request) -> str:
+    """Origine déclarée du trafic ; toute valeur inconnue compte comme utilisateur réel."""
+    value = request.headers.get("X-Traffic-Source", "user").lower()
+    return value if value in TRAFFIC_SOURCES else "user"
+
+
 def _predict_refs(request: Request, refs: list[EpisodeRef], endpoint: str):
     """Cache → modèle pour les absents → persistance. Retourne (prédictions, erreurs)."""
     store: ModelStore = request.app.state.store
@@ -266,6 +275,7 @@ def _predict_refs(request: Request, refs: list[EpisodeRef], endpoint: str):
             "created_at": now,
             "request_id": request.state.request_id,
             "endpoint": endpoint,
+            "source": _traffic_source(request),
             "series_id": ref.series_id,
             "season": ref.season,
             "episode": ref.episode,

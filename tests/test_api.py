@@ -242,3 +242,14 @@ def test_local_cache_in_front_of_redis(make_client):
     assert client.post("/predict", json=EP).json()["cached"] is False
     redis_client.fail = True  # Redis en panne : le niveau local sert encore
     assert client.post("/predict", json=EP).json()["cached"] is True
+
+
+def test_traffic_source_is_recorded(make_client):
+    client, engine = make_client()
+    client.post("/predict", json=EP, headers={"X-Traffic-Source": "loadtest"})
+    client.post("/predict", json=EP, headers={"X-Traffic-Source": "nimporte"})
+    client.post("/predict", json=EP)
+    time.sleep(0.3)
+    with engine.connect() as conn:
+        sources = sorted(r[0] for r in conn.execute(select(db.predictions.c.source)))
+    assert sources == ["loadtest", "user", "user"]

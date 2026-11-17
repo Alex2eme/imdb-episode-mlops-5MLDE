@@ -5,8 +5,20 @@ L'objectif n'est pas la performance du modèle, mais une chaîne opérationnelle
 reproductible et supervisée : ingestion → contrôle qualité → entraînement → registre →
 API → feedback → supervision.
 
-> Statut : étapes 0 à 7 en place (socle, données, entraînement, orchestration, API, suivi J+1, supervision, tests de charge). Les sections marquées 🚧 seront
-> complétées au fil des étapes.
+**Livrables** : ce README (sujet, architecture, données, commandes),
+[docs/SYNTHESE_OPS.md](docs/SYNTHESE_OPS.md) (choix techniques, preuves d'intégration,
+tests de charge, dimensionnement, limites) et [docs/DEMO.md](docs/DEMO.md) (scénarios
+nominal et incidents, commandes prêtes à exécuter).
+
+**Sommaire** : [Données](#données) · [Architecture](#architecture) ·
+[Démarrage rapide](#démarrage-rapide) ·
+[Chaîne données](#chaîne-données--ingestion-et-contrôles-qualité) ·
+[Entraînement et registre](#entraînement-traçabilité-et-registre) ·
+[Orchestration](#orchestration-prefect) · [API](#api-de-prédiction) ·
+[Suivi J+1](#suivi-en-production--prédiction-vs-note-réelle-j1) ·
+[Supervision](#supervision-prometheus--grafana) ·
+[Tests de charge](#tests-de-charge-et-dimensionnement) · [Qualité](#qualité-et-tests) ·
+[Structure du dépôt](#structure-du-dépôt)
 
 ## Données
 
@@ -38,23 +50,120 @@ API → feedback → supervision.
 | Tests de charge | Locust |
 | Supervision | Prometheus (métriques et règles d'alerte) + Grafana (3 dashboards provisionnés) |
 
-## Installation
+## Architecture
 
-Prérequis : Docker Desktop, [uv](https://docs.astral.sh/uv/), Git.
+```mermaid
+flowchart LR
+    GH[("Dépôt GitHub source<br/>ya0903/imdb-episode-dataset<br/>mis à jour chaque jour")]
+    U(("Clients"))
+    HOOK(("Webhook<br/>Discord / Slack"))
 
-```bash
-cp .env.example .env          # puis remplacer les mots de passe
-uv sync                       # installe Python 3.12 et les dépendances figées (uv.lock)
-uv run pre-commit install     # hooks ruff avant chaque commit
-docker compose up -d --wait   # démarre l'infrastructure
+    subgraph ORCH["Orchestration · Prefect"]
+        PS["Prefect server<br/>UI :4200"]
+        W["Worker<br/>watch-source (30 min)<br/>daily-pipeline"]
+    end
+
+    subgraph PIPE["Chaîne de traitement · image applicative"]
+        I["1 · Ingestion<br/>archive au commit SHA<br/>→ Parquet + manifeste"]
+        Q{"2 · Contrôles qualité<br/>Great Expectations<br/>+ règles métier"}
+        E["3 · Évaluation J+1<br/>prédit vs réel"]
+        T["4 · Entraînement<br/>LightGBM + Optuna<br/>(trials parallèles)"]
+        STOP["Arrêt + alerte<br/>critique"]
+    end
+
+    subgraph TRACK["Traçabilité"]
+        MLF["MLflow :5000<br/>runs, artefacts<br/>registre : champion /<br/>challenger / previous"]
+    end
+
+    subgraph SERVE["Service"]
+        API["API FastAPI :8000<br/>uvicorn N workers<br/>cache LRU local"]
+        RD[("Redis<br/>cache optionnel")]
+    end
+
+    subgraph STORE["Stockage"]
+        PG[("PostgreSQL<br/>app · mlflow · prefect")]
+        FS[("data/<br/>Parquet par SHA")]
+    end
+
+    subgraph SUP["Supervision"]
+        PR["Prometheus :9090<br/>règles d'alerte"]
+        GF["Grafana :3000<br/>3 dashboards"]
+    end
+
+    GH -- "API GitHub : dernier SHA<br/>codeload : archive" --> I
+    W <--> PS
+    W --> I --> Q
+    Q -- conforme --> E --> T
+    Q -- non conforme --> STOP
+    T -- "params, métriques,<br/>artefacts, modèle" --> MLF
+    I --> FS
+    Q -- "snapshots, rapports" --> PG
+    E -- "prediction_outcomes" --> PG
+    W -- "pipeline_steps, alertes" --> PG
+    MLF -- "alias champion<br/>(relu toutes les 30 s)" --> API
+    FS -- "historique des séries" --> API
+    U -- "/predict · /predict/batch<br/>/feedback" --> API
+    API -.-> RD
+    API -- "traces asynchrones :<br/>prédictions, requêtes, feedbacks" --> PG
+    PR -- "scrape /metrics" --> API
+    GF --> PR
+    GF -- "lecture seule" --> PG
+    STOP -.-> HOOK
 ```
 
-> **Windows + Smart App Control** : si `.venv\Scripts\python.exe` est bloqué, recréer
-> l'environnement avec le module venv standard, puis relancer `uv sync` :
-> `rm -rf .venv && "$(uv python find 3.12)" -m venv .venv && uv sync`
->
-> **Windows, encodage console** : exporter `PYTHONUTF8=1` (MLflow affiche des emojis
-> que la console cp1252 ne sait pas encoder).
+**Cycle quotidien** :
+1. `watch-source` détecte un nouveau commit du dépôt source, ou bien un opérateur lance
+   `daily-pipeline`.
+2. L'ingestion télécharge l'archive à ce commit, puis les contrôles qualité s'appliquent. En
+   cas d'échec critique, la chaîne s'arrête et une alerte part.
+3. L'évaluation J+1 compare les prédictions servies la veille aux notes publiées.
+4. L'entraînement et la règle de promotion peuvent changer l'alias `champion`, que l'API
+   recharge à chaud.
+5. Chaque étape, chaque prédiction et chaque décision est tracée dans PostgreSQL et MLflow,
+   et visible dans Grafana.
+
+| Conteneur | Rôle | Limites (RAM / CPU) |
+|---|---|---|
+| `postgres` | bases `app` (traces), `mlflow`, `prefect` | 512 Mo |
+| `mlflow` | suivi, registre, artefacts | 1 Go |
+| `prefect-server` | API et UI d'orchestration | 768 Mo |
+| `worker` | exécute les flows (ingestion → entraînement) | 2 Go / 10 CPU |
+| `api` | service de prédiction | 2 Go / 2 CPU (paramétrable) |
+| `redis` | cache partagé (désactivé par défaut) | 192 Mo |
+| `prometheus`, `grafana` | supervision | 256 Mo chacun |
+| `pipeline` (profil `jobs`) | commandes ponctuelles (CLI, tests, Locust) | 2 Go / 10 CPU |
+
+## Démarrage rapide
+
+Prérequis : Docker avec Compose v2 (environ 4 Go de RAM pour Docker), Git. Les scénarios
+complets, avec ce qu'on doit observer, sont dans [docs/DEMO.md](docs/DEMO.md).
+
+```bash
+cp .env.example .env                        # puis remplacer les mots de passe « change-me »
+export GIT_SHA=$(git rev-parse HEAD)        # version du code intégrée à l'image
+docker compose --profile jobs build         # image applicative (environ 10 min la 1re fois)
+docker compose up -d --wait                 # 8 services
+R="docker compose run --rm pipeline python -m imdb_mlops"
+$R data && $R train                         # 1er snapshot, 1er modèle (environ 6 min)
+curl -s localhost:8000/predict -H 'Content-Type: application/json' \
+  -d '{"series_id": "tt0903747", "season": 5, "episode": 16}'
+```
+
+Ensuite, la chaîne tourne seule : le worker Prefect surveille le dépôt source et réentraîne
+à chaque nouveau commit.
+
+**Développement local** (lint, tests unitaires, hooks) :
+
+```bash
+uv sync                       # Python 3.12 et dépendances figées (uv.lock)
+uv run pre-commit install     # ruff avant chaque commit
+```
+
+> **Windows + Smart App Control** : si `.venv\Scripts\python.exe` ou une DLL est bloquée,
+> recréer l'environnement avec le module venv standard
+> (`"$(uv python find 3.12)" -m venv .venv && uv sync`), ou exécuter les tests dans l'image
+> (`docker compose run --rm pipeline pytest`). Exporter aussi `PYTHONUTF8=1` (MLflow affiche
+> des emojis que la console cp1252 ne sait pas encoder).
 
 ### Services
 
@@ -280,6 +389,11 @@ prédiction servie sur un snapshot plus ancien
 
 Les feedbacks utilisateurs (`/feedback`) offrent une seconde source de vérité terrain.
 
+**Origine du trafic** : chaque prédiction enregistre l'en-tête `X-Traffic-Source` (`user` par
+défaut, `simulation` pour le simulateur, `loadtest` pour Locust). Le trafic de charge est
+**exclu** de l'évaluation J+1. Sans cette séparation, les 458 566 prédictions des tests de
+charge auraient constitué 99,8 % des évaluations du 17/11.
+
 ### Rejeu réel J → J+1 (snapshots du 14/11 `514edeb` et du 15/11 `1e02ab7`)
 
 ```bash
@@ -423,57 +537,25 @@ docker compose run --rm pipeline pytest -m "not integration"   # mêmes tests, d
 uv run pytest -m integration         # nécessite docker compose up
 ```
 
-## Décisions techniques (journal)
+## Structure du dépôt
 
-- **Python 3.12 figé** (`.python-version`, `requires-python`) : MLflow, Great Expectations et
-  LightGBM ne garantissent pas encore le support de 3.14. uv télécharge 3.12 sans toucher au
-  Python du système.
-- **Ingestion par archive au commit** plutôt que fichier par fichier : un seul téléchargement
-  (≈ 5 Mo) au lieu d'environ 10 000, et un SHA immuable qui identifie exactement les données.
-- **Pas de MinIO** : les images Docker communautaires de MinIO ne sont plus distribuées
-  publiquement. MLflow sert lui-même les artefacts (`--serve-artifacts`, volume
-  `mlflow_artifacts`), ce qui supprime un service et un jeu de secrets. Le client n'a besoin
-  que de l'URL de MLflow.
-- **Jobs serveur MLflow désactivés** (`MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`) : avec les
-  workers GenAI activés, le serveur dépassait 768 Mo et redémarrait en boucle. Sans eux, il
-  consomme environ 570 Mo.
-- **Exécution conteneurisée des traitements** : sur le poste Windows de développement, Smart
-  App Control bloque des DLL non signées de manière non déterministe (scipy, pyarrow). Les
-  traitements tournent donc dans une image Linux unique, construite depuis `uv.lock`. C'est
-  aussi la cible de production. Le `.venv` local sert au lint et aux tests unitaires.
-- **`meta.json` fait foi** : le dépôt source ne supprime pas les fichiers des séries sorties du
-  top 10 000 (10 185 fichiers pour 9 912 séries déclarées). Ces orphelins sont exclus et
-  comptés (contrôle de type warning).
-- **Deux niveaux de sévérité** : tout écart ne justifie pas d'arrêter la production. Seuls les
-  défauts qui rendraient le modèle faux ou inutilisable bloquent la chaîne.
-- **Le tuning plafonné à 10 cœurs sur 12** : à 12 cœurs, le serveur MLflow, privé de CPU,
-  coupait des connexions (*connection reset*) pendant le tuning. Le conteneur `pipeline` est
-  limité à 10 CPU (5 trials × 2 threads), le keep-alive d'uvicorn côté MLflow passe à 120 s, et
-  le traçage d'un trial est retenté puis ignoré en cas d'échec : un problème de traçage ne fait
-  pas échouer un entraînement.
-- **Seuil de promotion à 0,005** : deux tunings sur les mêmes données diffèrent d'environ
-  0,0015 de RMSE. Promouvoir sur un tel écart remplacerait le modèle en production sans gain réel.
-- **Prefect plutôt qu'Airflow** : déploiement léger (un serveur et un worker, environ 400 Mo),
-  flows écrits en Python pur et testables, relances conditionnelles natives
-  (`retry_condition_fn`). Airflow aurait demandé un scheduler, un webserver et des workers,
-  incompatibles avec un budget Docker de 3,9 Go.
-- **Features vectorisées** : la moyenne glissante calculée série par série prenait 40 à 50 s
-  dans le worker. En version vectorisée, il faut 3,5 s pour 421 000 épisodes.
-- **Rétablissement de Redis vérifié en arrière-plan** : un premier essai rétablissait le cache
-  lors d'une requête utilisateur. Avec le conteneur Redis arrêté, la seule résolution DNS de
-  `redis` bloquait cette requête de 4 à 30 s, ce que les timeouts de socket ne couvrent pas. Une
-  sonde de fond détecte maintenant la panne et le retour de Redis, et aucune requête n'attend.
-- **Traces écrites hors du chemin de réponse** : une file bornée et un thread d'insertion par
-  lots. Une base lente ou en panne ne ralentit pas l'API : les traces perdues sont comptées
-  (`db_traces_dropped_total`).
-- **Dashboards générés par du code** : un script Python produit les JSON provisionnés. Les
-  requêtes sont relisibles, la mise en page est cohérente, et les dashboards ne peuvent pas être
-  modifiés depuis l'interface (`allowUiUpdates: false`). Toute modification passe par Git.
-- **Limites mémoire par conteneur** : Docker ne dispose que d'environ 3,9 Go sur la machine de
-  développement. Chaque service est borné pour qu'aucun ne puisse affamer les autres.
+```
+configs/config.yaml          paramètres métier (données, qualité, entraînement, promotion, suivi)
+src/imdb_mlops/
+  data/                      ingestion, contrôles qualité, injection de défauts, étape données
+  features.py                features (entraînement vectorisé + inférence numpy)
+  training/                  entraînement traçable, registre et règles de mise en service
+  orchestration/             flows et déploiements Prefect
+  api/                       FastAPI, chargement du champion, cache, télémétrie
+  monitoring/                évaluation J+1, simulateur de trafic
+  db.py, alerts.py           persistance (PostgreSQL), alertes
+  __main__.py                CLI : data, train, models, rollback, reproduce, evaluate, simulate
+tests/                       unitaires + intégration (marqueur integration)
+loadtests/                   Locust, banc de mesure, campagne, rapport
+docker/                      images, init PostgreSQL, Prometheus, Grafana (dashboards générés)
+reports/loadtests/           résultats des tests de charge (RESULTS.md, results.json, CSV)
+docs/                        synthèse OPS, guide de démonstration
+```
 
-## Architecture 🚧
-
-## Démonstration (cas d'usage simulés) 🚧
-
-## Synthèse OPS 🚧
+Les décisions techniques et leur justification, les preuves d'intégration et les limites
+connues sont dans **[docs/SYNTHESE_OPS.md](docs/SYNTHESE_OPS.md)**.

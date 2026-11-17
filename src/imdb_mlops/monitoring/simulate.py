@@ -24,6 +24,7 @@ from imdb_mlops.config import ROOT_DIR
 
 log = logging.getLogger(__name__)
 KEY = ["series_id", "season", "episode"]
+HEADERS = {"X-Traffic-Source": "simulation"}
 
 
 def _frame(sha: str | None) -> pd.DataFrame:
@@ -101,7 +102,7 @@ def simulate(
 
     def send(item: dict) -> None:
         path = "/predict/batch" if item["kind"] == "batch" else "/predict"
-        with httpx.Client(base_url=api_url, timeout=30) as client:
+        with httpx.Client(base_url=api_url, timeout=30, headers=HEADERS) as client:
             r = client.post(path, json=item["body"])
         stats[f"{item['kind']}:{r.status_code}"] += 1
         if r.status_code != 200 or item["kind"] == "batch" or rng.random() >= feedback_rate:
@@ -120,7 +121,7 @@ def simulate(
     # Comme un utilisateur réel, le feedback arrive après coup : les traces de prédiction
     # (écrites en base par lots, < 1 s) sont alors disponibles.
     time.sleep(2)
-    with httpx.Client(base_url=api_url, timeout=30) as client:
+    with httpx.Client(base_url=api_url, timeout=30, headers=HEADERS) as client:
         for pid, rating in feedbacks:
             fb = client.post("/feedback", json={"prediction_id": pid, "rating": rating})
             stats[f"feedback:{fb.status_code}"] += 1

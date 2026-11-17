@@ -52,6 +52,7 @@ def pending_predictions(actual: dict, cfg: AppConfig) -> pd.DataFrame:
         .where(
             and_(
                 p.c.status == "ok",
+                p.c.source != "loadtest",  # le trafic de charge n'est pas de la production
                 p.c.created_at >= since,
                 p.c.data_sha != actual["sha"],
                 s.c.commit_date < actual["commit_date"],

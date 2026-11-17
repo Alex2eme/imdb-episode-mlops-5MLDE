@@ -111,6 +111,9 @@ predictions = Table(
     Column("latency_ms", Float),
     Column("cached", Boolean),
     Column("status", String(16), nullable=False),  # ok | error
+    # Origine du trafic (en-tête X-Traffic-Source) : user | simulation | loadtest.
+    # Le trafic de test de charge est exclu du suivi de performance en production.
+    Column("source", String(16), nullable=False, server_default="user", index=True),
     Column("error", String(64)),
 )
 
@@ -173,7 +176,17 @@ def get_engine() -> Engine:
 
 
 def init_db() -> None:
-    metadata.create_all(get_engine())
+    engine = get_engine()
+    metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":  # migration des bases créées avant la colonne
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source VARCHAR(16) "
+                "NOT NULL DEFAULT 'user'"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_predictions_source ON predictions (source)"
+            )
 
 
 def _parse_dt(value: str | None) -> datetime | None:

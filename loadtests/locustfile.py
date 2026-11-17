@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 from locust import FastHttpUser, constant, events, task
 
+# Identifie le trafic de charge : il est exclu du suivi de performance en production.
+HEADERS = {"X-Traffic-Source": "loadtest"}
 KEYS: list[tuple[str, int, int]] = []
 # Séquence de clés pré-tirée selon la popularité : un tirage pondéré parmi ~430 000 clés à
 # chaque requête ferait de Locust lui-même le goulot d'étranglement.
@@ -67,24 +69,26 @@ class ApiUser(FastHttpUser):
 
     @task(85)
     def predict(self):
-        self.client.post("/predict", json=self._key(), name="/predict")
+        self.client.post("/predict", json=self._key(), name="/predict", headers=HEADERS)
 
     @task(5)
     def predict_batch(self):
         self.client.post(
             "/predict/batch",
+            headers=HEADERS,
             json={"items": [self._key() for _ in range(20)]},
             name="/predict/batch",
         )
 
     @task(5)
     def model(self):
-        self.client.get("/model", name="/model")
+        self.client.get("/model", name="/model", headers=HEADERS)
 
     @task(5)
     def invalid(self):
         with self.client.post(
             "/predict",
+            headers=HEADERS,
             json={"series_id": "bad", "season": -1, "episode": 1},
             name="/predict [invalide]",
             catch_response=True,
