@@ -29,7 +29,7 @@ groups:
           summary: "Latence p95 de /predict supérieure à 500 ms"
 
       - alert: ModelNotLoaded
-        expr: absent(model_info) or sum(model_info) == 0
+        expr: absent(model_info == 1)
         for: 1m
         labels: {severity: critical}
         annotations:

@@ -18,7 +18,11 @@ Raccourci utilisé dans ce guide :
 
 ```bash
 R="docker compose run --rm pipeline python -m imdb_mlops"
+set -a; . ./.env; set +a      # ADMIN_TOKEN pour /admin/reload
 ```
+
+Les ports ne sont publiés que sur `127.0.0.1` : les interfaces ne sont pas joignables depuis
+une autre machine du réseau.
 
 ---
 
@@ -167,7 +171,7 @@ docker compose up -d --wait api     # retour à la configuration par défaut
 $R train --trials 2          # crée une nouvelle version (en général rejetée : gain < 0,005)
 $R models
 $R rollback --version 2 --reason "démo : mise en service manuelle"
-curl -s -X POST localhost:8000/admin/reload    # sinon automatique en 30 s au plus
+curl -s -X POST localhost:8000/admin/reload -H "X-Admin-Token: $ADMIN_TOKEN"   # sinon automatique en 30 s au plus
 curl -s localhost:8000/model                    # version 2 servie, sans redémarrage
 $R rollback --reason "démo : retour au champion précédent"
 ```
@@ -195,12 +199,16 @@ l'historique des commits du dépôt source ; ceux d'origine du projet sont indiq
 ```bash
 J0=514edebea2f29b258470d743f3161adca556a9c0   # 14/11
 J1=1e02ab7c027c48274aca22eb04244a849f909ae7   # 15/11
-$R data --ref $J0 && curl -s -X POST localhost:8000/admin/reload
+$R data --ref $J0 && $R data --ref $J1
+SERVE_SNAPSHOT_SHA=$J0 docker compose up -d --wait api      # API épinglée sur le jour J
 docker compose run --rm pipeline python -m imdb_mlops simulate -n 400 \
   --api-url http://api:8000 --served-sha $J0 --target-sha $J1
-$R data --ref $J1
-$R evaluate     # n_evaluated, n_new_episodes, live_rmse…
+$R evaluate --sha $J1     # n_evaluated, n_new_episodes, live_rmse…
+docker compose up -d --wait api                               # retour au dernier snapshot
 ```
+
+Les prédictions déjà évaluées ne le sont pas une seconde fois : un rejeu sur des snapshots
+déjà comparés n'évalue que le nouveau trafic simulé.
 
 Où le voir :
 - **Grafana « Performance en production »** : RMSE live, nouveaux épisodes vs connus,

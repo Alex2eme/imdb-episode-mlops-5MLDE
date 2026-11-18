@@ -253,3 +253,44 @@ def test_traffic_source_is_recorded(make_client):
     with engine.connect() as conn:
         sources = sorted(r[0] for r in conn.execute(select(db.predictions.c.source)))
     assert sources == ["loadtest", "user", "user"]
+
+
+def test_trace_writer_drains_queue_on_stop(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'w.db').as_posix()}")
+    monkeypatch.setattr(db, "get_engine", lambda: engine)
+    db.metadata.create_all(engine)
+    writer = TraceWriter(batch_size=2)  # lots de 20 lignes : 3 lots pour 45 traces
+    row = {
+        "created_at": pd.Timestamp.now(tz="UTC").to_pydatetime(),
+        "method": "GET",
+        "path": "/x",
+        "status_code": 200,
+        "duration_ms": 1.0,
+    }
+    for _ in range(45):
+        writer.put("api_requests", dict(row))
+    writer.stop()
+    with engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(db.api_requests)).scalar() == 45
+
+
+def test_admin_reload_requires_token(make_client, monkeypatch):
+    client, _ = make_client()
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    assert client.post("/admin/reload").status_code == 403
+    monkeypatch.setenv("ADMIN_TOKEN", "s3cret")
+    assert client.post("/admin/reload").status_code == 401
+    assert client.post("/admin/reload", headers={"X-Admin-Token": "faux"}).status_code == 401
+    r = client.post("/admin/reload", headers={"X-Admin-Token": "s3cret"})
+    assert r.status_code == 200
+    assert r.json()["model_version"] == "7"
+
+
+def test_check_features_rejects_incompatible_model():
+    from imdb_mlops.api.model_store import ModelUnavailableError, check_features
+    from imdb_mlops.features import FEATURES
+
+    check_features({})  # versions anciennes sans tag : acceptées
+    check_features({"features": ",".join(FEATURES)})
+    with pytest.raises(ModelUnavailableError):
+        check_features({"features": ",".join(reversed(FEATURES))})

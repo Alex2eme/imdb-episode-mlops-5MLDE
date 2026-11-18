@@ -229,11 +229,18 @@ def upsert_snapshot(manifest: dict, report: dict | None = None) -> None:
 
 
 def last_valid_snapshot(exclude_sha: str | None = None) -> dict | None:
-    """Dernier snapshot ayant passé les contrôles (référence pour les comparaisons)."""
+    """Snapshot validé le plus récent *par date des données* (date du commit source).
+
+    Trier par date de validation ferait d'un ancien commit ré-ingéré (rejeu, démo) le
+    « dernier » snapshot : l'API et l'entraînement repartiraient sur de vieilles données.
+    """
     q = (
         select(data_snapshots)
         .where(data_snapshots.c.quality_status == "passed")
-        .order_by(data_snapshots.c.validated_at.desc())
+        .order_by(
+            data_snapshots.c.commit_date.desc().nulls_last(),
+            data_snapshots.c.validated_at.desc(),
+        )
         .limit(1)
     )
     if exclude_sha:
@@ -294,3 +301,14 @@ def get_snapshot(sha: str) -> dict | None:
 def record_model_event(**values) -> None:
     with get_engine().begin() as conn:
         conn.execute(model_events.insert().values(created_at=datetime.now(UTC), **values))
+
+
+def model_trained_on(sha: str) -> bool:
+    """Un modèle a-t-il été entraîné (et enregistré) sur ce snapshot ?"""
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(model_events.c.id)
+            .where(model_events.c.event == "registered", model_events.c.data_sha == sha)
+            .limit(1)
+        ).first()
+    return row is not None

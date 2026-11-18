@@ -19,3 +19,18 @@ jobs:
         run: uv run ruff check . && uv run ruff format --check .
       - name: Tests unitaires
         run: uv run pytest -m "not integration" --cov=imdb_mlops --cov-report=term
+
+  # Toute l'exécution (pipeline, worker, API, tests d'intégration) passe par l'image et
+  # docker-compose : une erreur de Dockerfile ou de compose doit casser la CI.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Valider docker-compose.yml
+        run: cp .env.example .env && docker compose config -q
+      - name: Construire l'image applicative
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t imdb-mlops/app:ci .
+      - name: "Fumée : CLI et lint dans l'image"
+        run: |
+          docker run --rm imdb-mlops/app:ci python -m imdb_mlops --help
+          docker run --rm imdb-mlops/app:ci ruff check .

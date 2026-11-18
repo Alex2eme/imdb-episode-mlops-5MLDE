@@ -11,7 +11,6 @@ import logging
 import os
 import queue
 import threading
-import time
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -48,9 +47,22 @@ DB_QUEUE = Gauge(
 )
 
 
+_model_labels: dict[str, str] | None = None
+
+
 def set_model_info(version: str, data_sha: str) -> None:
-    MODEL_INFO.clear()
-    MODEL_INFO.labels(version=version, data_sha=data_sha[:10]).set(1)
+    """Marque la version servie à 1 et la précédente à 0.
+
+    `Gauge.clear()` n'est pas implémenté en mode multi-processus de prometheus_client :
+    l'ancien label restait à 1 et Grafana affichait deux versions « servies ». On remet
+    donc explicitement l'ancien label à 0 (les requêtes filtrent `model_info == 1`).
+    """
+    global _model_labels  # noqa: PLW0603 (état du processus worker)
+    labels = {"version": version, "data_sha": data_sha[:10]}
+    if _model_labels is not None and _model_labels != labels:
+        MODEL_INFO.labels(**_model_labels).set(0)
+    MODEL_INFO.labels(**labels).set(1)
+    _model_labels = labels
 
 
 class TraceWriter:
@@ -75,11 +87,26 @@ class TraceWriter:
             self._thread = threading.Thread(target=self._run, name="trace-writer", daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, max_batches: int = 20) -> None:
+        """Arrêt : vide toute la file (et non un seul lot) ; ce qui reste au-delà de
+        `max_batches` lots est compté comme perdu au lieu de disparaître silencieusement."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
-        self._flush()
+        for _ in range(max_batches):
+            if self._queue.empty():
+                return
+            self._flush()
+        lost: dict[str, int] = {}
+        while True:
+            try:
+                table, _row = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            lost[table] = lost.get(table, 0) + 1
+        for table, n in lost.items():
+            DB_DROPPED.labels(table=table).inc(n)
+            log.warning("%d traces %s perdues à l'arrêt", n, table)
 
     def put(self, table: str, row: dict) -> None:
         if not self.enabled:
@@ -90,8 +117,7 @@ class TraceWriter:
             DB_DROPPED.labels(table=table).inc()
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            time.sleep(self.flush_every_s)
+        while not self._stop.wait(self.flush_every_s):
             self._flush()
 
     def _flush(self) -> None:

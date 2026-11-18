@@ -334,7 +334,7 @@ CPU, la mémoire et le cache se règlent par variables d'environnement (`API_WOR
 | `POST /feedback` | Note observée pour une `prediction_id` (évaluation en production) |
 | `GET /model` | Version servie, run MLflow, SHA des données, RMSE |
 | `GET /health`, `GET /ready` | Liveness ; readiness (modèle chargé, état du cache) |
-| `POST /admin/reload` | Force la relecture du champion (sinon automatique toutes les 30 s) |
+| `POST /admin/reload` | Force la relecture du champion (sinon automatique toutes les 30 s). Exige l'en-tête `X-Admin-Token` (variable `ADMIN_TOKEN` de `.env`) ; désactivé sans jeton |
 | `GET /metrics` | Métriques Prometheus (multi-workers) |
 
 ```bash
@@ -398,12 +398,17 @@ charge auraient constitué 99,8 % des évaluations du 17/11.
 
 ```bash
 R="docker compose run --rm pipeline python -m imdb_mlops"
-$R data --ref 514edebea2f29b258470d743f3161adca556a9c0        # jour J
-curl -X POST localhost:8000/admin/reload                         # API sur J (sinon < 30 s)
-$R simulate -n 400 --api-url http://api:8000    --served-sha 514edebea2f29b258470d743f3161adca556a9c0    --target-sha 1e02ab7c027c48274aca22eb04244a849f909ae7       # trafic (dont nouveaux épisodes)
-$R data --ref 1e02ab7c027c48274aca22eb04244a849f909ae7        # jour J+1
-$R evaluate
+J0=514edebea2f29b258470d743f3161adca556a9c0 ; J1=1e02ab7c027c48274aca22eb04244a849f909ae7
+$R data --ref $J0 && $R data --ref $J1                       # les deux snapshots
+SERVE_SNAPSHOT_SHA=$J0 docker compose up -d --wait api       # API épinglée sur le jour J
+$R simulate -n 400 --api-url http://api:8000 --served-sha $J0 --target-sha $J1
+$R evaluate --sha $J1                                        # comparaison au jour J+1
+docker compose up -d --wait api                              # retour au dernier snapshot
 ```
+
+Le « dernier snapshot » est le plus récent par **date des données** (date du commit source),
+et non par date d'ingestion : ré-ingérer un ancien commit ne change pas ce que servent l'API
+et l'entraînement. Pour servir un snapshot précis, on l'épingle avec `SERVE_SNAPSHOT_SHA`.
 
 | | n | MAE | RMSE | Biais |
 |---|---|---|---|---|

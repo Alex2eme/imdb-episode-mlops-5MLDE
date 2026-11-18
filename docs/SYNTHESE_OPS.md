@@ -169,6 +169,20 @@ d'exploitation autant que le résultat.
 | Plafond de 110 req/s quelle que soit l'API | Générateur Locust saturé (1 processus, `requests`) | `FastHttpUser` et 4 processus |
 | Évaluation J+1 du 17/11 sur 436 231 prédictions | Les 458 566 prédictions des tests de charge étaient traitées comme du trafic de production et noyaient les métriques live | Origine du trafic tracée (`X-Traffic-Source` : `user`, `simulation`, `loadtest`), trafic de charge exclu de l'évaluation, historique étiqueté d'après les fenêtres horaires et évaluations polluées supprimées |
 
+### Relecture du code (18/11) : constats corrigés
+
+| Constat | Correction |
+|---|---|
+| Après un rollback, Grafana affichait deux versions « servies » : `Gauge.clear()` n'est pas pris en charge par Prometheus en mode multi-processus | L'ancienne version est remise à 0 et les requêtes filtrent `model_info == 1` |
+| Un commit dont l'entraînement avait échoué après ses relances était considéré comme traité, donc jamais réentraîné | Un commit n'est traité que si ses données sont rejetées ou si un modèle a été enregistré dessus |
+| `watch-source` lançait la chaîne en sous-flow, donc hors de la limite de concurrence : deux entraînements pouvaient tourner en même temps | Lancement via le déploiement `daily-pipeline` (`run_deployment`), soumis à sa limite de 1 |
+| Le « dernier snapshot » était choisi par date de validation : ré-ingérer un ancien commit faisait servir de vieilles données | Tri par date des données (commit source) ; épinglage explicite avec `SERVE_SNAPSHOT_SHA` |
+| À l'arrêt de l'API, seul un lot de traces était écrit, et le reste était perdu sans être compté | La file est vidée entièrement et tout reliquat est compté dans `db_traces_dropped_total` |
+| Ports publiés sur toutes les interfaces, Redis sans mot de passe ; `/admin/reload` ouvert | Publication sur `127.0.0.1` uniquement ; jeton `X-Admin-Token` exigé |
+| Une version entraînée avec d'autres features pouvait être chargée sans contrôle | Comparaison avec le tag `features` de la version : chargement refusé et modèle précédent conservé |
+| La CI ne construisait pas l'image Docker | Ajout d'un job : validation de `docker compose config`, `docker build`, tests de fumée dans l'image |
+| `boto3` inutile (reliquat de MinIO) et code mort | Supprimés |
+
 ---
 
 ## 6. Limites connues et pistes
@@ -178,7 +192,9 @@ d'exploitation autant que le résultat.
   l'autre atteint ±30 % (atténuée par la médiane de 3 runs). À re-mesurer sur l'infrastructure
   cible.
 - **Traces perdues pendant la campagne de charge** : environ 2 000 (≈ 0,3 %), cause non
-  établie, car les journaux ont été effacés par les redéploiements successifs. Le compteur
+  établie avec certitude, car les journaux ont été effacés par les redéploiements successifs.
+  La relecture du code a trouvé une cause plausible, corrigée depuis : à l'arrêt, l'API ne
+  vidait qu'un seul lot de sa file de traces et perdait le reste sans le compter. Le compteur
   `db_traces_dropped_total` et l'alerte `TracesDropped` permettent de les détecter.
 - **Origine du trafic déclarative** : un client qui omet `X-Traffic-Source` compte comme un
   utilisateur réel. En production, il faudrait réserver la valeur `loadtest` à des clients
@@ -193,9 +209,10 @@ d'exploitation autant que le résultat.
 - **Alertes** : envoyées par webhook (Discord/Slack) si `ALERT_WEBHOOK_URL` est configuré, et
   toujours en base et dans les logs. Les règles Prometheus ne sont pas reliées à Alertmanager,
   elles sont seulement visibles dans Prometheus et Grafana.
-- **Sécurité** : pas d'authentification sur l'API ni sur MLflow/Prefect, ce qui est acceptable
-  en local seulement. Il faudrait un reverse proxy avec authentification et TLS avant toute
-  exposition.
+- **Sécurité** : les ports sont publiés sur `127.0.0.1` uniquement et `/admin/reload` exige un
+  jeton. L'API de prédiction, MLflow et Prefect restent sans authentification, ce qui n'est
+  acceptable qu'en local. Il faudrait un reverse proxy avec authentification et TLS avant
+  toute exposition.
 - **Tests du flow Prefect** : le serveur de test embarqué de Prefect 3.8 est incompatible avec
   la version de FastAPI du projet. Le test d'orchestration s'exécute donc contre le vrai serveur
   (test d'intégration).

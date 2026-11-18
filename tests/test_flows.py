@@ -70,3 +70,16 @@ def test_invalid_batch_stops_before_training(prefect_api, monkeypatch):
     assert state.is_failed()
     assert calls["train"] == 0
     assert any("daily-pipeline" in t for t in calls["alerts"])
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "trained", "expected"),
+    [
+        (None, False, False),  # nouveau commit
+        ({"quality_status": "failed"}, False, True),  # lot rejeté : inutile de rejouer
+        ({"quality_status": "passed"}, True, True),  # entraîné
+        ({"quality_status": "passed"}, False, False),  # entraînement en échec : à reprendre
+    ],
+)
+def test_already_processed(snapshot, trained, expected):
+    assert flows.already_processed(snapshot, trained) is expected

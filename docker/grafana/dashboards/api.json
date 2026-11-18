@@ -337,7 +337,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "count by (version) (model_info)",
+          "expr": "count by (version) (model_info == 1)",
           "legendFormat": "v{{version}}",
           "range": true
         }

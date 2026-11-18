@@ -7,6 +7,7 @@ Documentation interactive : /docs
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import threading
@@ -442,7 +443,16 @@ async def model_info(request: Request) -> ModelInfo:
 
 @app.post("/admin/reload", tags=["exploitation"])
 def reload_model(request: Request) -> dict:
-    """Force la relecture du champion (sinon automatique toutes les MODEL_REFRESH_S)."""
+    """Force la relecture du champion (sinon automatique toutes les MODEL_REFRESH_S).
+
+    Protégé par l'en-tête `X-Admin-Token` (variable ADMIN_TOKEN) ; désactivé si non défini.
+    """
+    expected = os.environ.get("ADMIN_TOKEN", "")
+    if not expected:
+        raise ApiError(403, "admin_disabled", "Endpoint d'administration désactivé (ADMIN_TOKEN)")
+    given = request.headers.get("X-Admin-Token", "")
+    if not hmac.compare_digest(given.encode(), expected.encode()):
+        raise ApiError(401, "unauthorized", "Jeton d'administration invalide")
     changed = _refresh(request.app)
     store: ModelStore = request.app.state.store
     if not store.ready:

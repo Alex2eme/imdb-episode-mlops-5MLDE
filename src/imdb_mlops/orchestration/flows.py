@@ -220,23 +220,41 @@ def daily_pipeline(
     return result
 
 
+def already_processed(snapshot: dict | None, trained: bool) -> bool:
+    """Un commit est traité si ses données ont été rejetées (résultat déterministe) ou si un
+    modèle a été entraîné dessus. Un snapshot validé sans modèle (entraînement en échec
+    après ses relances) doit être repris, sinon il ne serait jamais entraîné."""
+    if snapshot is None:
+        return False
+    return snapshot["quality_status"] == "failed" or trained
+
+
 @flow(name="watch-source", on_failure=[_alert_flow_failure])
 def watch_source(n_trials: int | None = None) -> dict:
-    """Ingestion dynamique (pull) : détecte un nouveau commit du dépôt source et déclenche
-    la chaîne seulement dans ce cas. Planifié à intervalle régulier."""
+    """Ingestion dynamique (pull) : détecte un commit du dépôt source non encore traité et
+    déclenche la chaîne seulement dans ce cas. Planifié à intervalle régulier."""
+    from prefect.deployments import run_deployment
+
     logger = get_run_logger()
     sha = resolve_source_commit()
     known = db.get_snapshot(sha)
-    if known is not None:
+    if already_processed(known, db.model_trained_on(sha)):
         logger.info("Commit %s déjà traité (%s) : rien à faire", sha[:10], known["quality_status"])
         return {"sha": sha, "triggered": False}
-    logger.info("Nouveau commit source %s → déclenchement de la chaîne", sha[:10])
+    reason = "nouveau commit" if known is None else "snapshot validé sans modèle : reprise"
+    logger.info("Commit source %s (%s) → déclenchement de la chaîne", sha[:10], reason)
     send_alert(
-        "Nouveau snapshot source détecté",
-        f"Commit {sha[:10]} : lancement de la chaîne",
+        "Snapshot source à traiter",
+        f"Commit {sha[:10]} ({reason}) : lancement de la chaîne",
         severity="info",
         source="orchestration",
-        details={"sha": sha},
+        details={"sha": sha, "reason": reason},
     )
-    result = daily_pipeline(ref=sha, n_trials=n_trials)
-    return {"sha": sha, "triggered": True, "result": result}
+    # Lancement via le déploiement (et non en sous-flow) : sa limite de concurrence (1)
+    # s'applique, donc jamais deux entraînements simultanés dans le worker.
+    run = run_deployment(
+        "daily-pipeline/daily-pipeline",
+        parameters={"ref": sha, "n_trials": n_trials},
+        timeout=None,
+    )
+    return {"sha": sha, "triggered": True, "flow_run": str(run.id), "state": run.state_name}

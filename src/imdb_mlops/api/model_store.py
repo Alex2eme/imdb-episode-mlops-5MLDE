@@ -8,6 +8,7 @@ périodique). L'historique provient du dernier snapshot validé (le plus récent
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,10 +27,6 @@ class ModelUnavailableError(RuntimeError):
     """Aucun modèle chargé (registre injoignable au démarrage, pas de champion...)."""
 
 
-class UnknownSeriesError(KeyError):
-    pass
-
-
 @dataclass(frozen=True)
 class Loaded:
     model: object
@@ -42,8 +39,20 @@ class Loaded:
     loaded_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
-def _load_history(sha: str | None = None) -> tuple[str, dict[str, SeriesHistory]]:
-    snap = db.get_snapshot(sha) if sha else db.last_valid_snapshot()
+# Snapshot servi épinglé (rejeu, démonstration J+1) ; vide = dernier snapshot validé.
+SERVE_SNAPSHOT_SHA = os.environ.get("SERVE_SNAPSHOT_SHA", "")
+
+
+def _serving_snapshot() -> dict | None:
+    if SERVE_SNAPSHOT_SHA:
+        snap = db.get_snapshot(SERVE_SNAPSHOT_SHA)
+        if snap is None or snap["quality_status"] != "passed":
+            raise ModelUnavailableError(f"Snapshot épinglé {SERVE_SNAPSHOT_SHA[:10]} non validé")
+        return snap
+    return db.last_valid_snapshot()
+
+
+def _load_history(snap: dict | None) -> tuple[str, dict[str, SeriesHistory]]:
     if snap is None:
         raise ModelUnavailableError("Aucun snapshot validé pour l'historique des séries")
     df = pd.read_parquet(ROOT_DIR / snap["parquet_path"])
@@ -66,6 +75,18 @@ def _predict_array(model, X: np.ndarray) -> np.ndarray:
             X, num_iteration=getattr(model, "best_iteration_", None) or None, num_threads=1
         )
     return model.predict(pd.DataFrame(X, columns=FEATURES))
+
+
+def check_features(tags: dict) -> None:
+    """Refuse une version entraînée avec d'autres features que celles calculées par ce code
+    (rollback vers une version antérieure à une évolution des features). Les versions sans
+    tag `features` (antérieures à son introduction) sont acceptées."""
+    declared = tags.get("features")
+    if declared and declared.split(",") != FEATURES:
+        raise ModelUnavailableError(
+            f"Features incompatibles avec ce code : modèle {declared!r}, attendu "
+            f"{','.join(FEATURES)!r}"
+        )
 
 
 class ModelStore:
@@ -102,7 +123,8 @@ class ModelStore:
         with self._lock:
             try:
                 champ = MlflowClient().get_model_version_by_alias(name, "champion")
-                latest = db.last_valid_snapshot()
+                latest = _serving_snapshot()
+                check_features(champ.tags)
                 cur = self._loaded
                 same_model = cur is not None and cur.version == str(champ.version)
                 same_data = cur is not None and latest is not None and cur.data_sha == latest["sha"]
@@ -116,7 +138,7 @@ class ModelStore:
                 if same_data and not force:
                     sha, history = cur.data_sha, cur.history
                 else:
-                    sha, history = _load_history()
+                    sha, history = _load_history(latest)
                 rmse = champ.tags.get("rmse")
                 self._loaded = Loaded(
                     model=model,

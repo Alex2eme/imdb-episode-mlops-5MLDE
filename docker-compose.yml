@@ -1,5 +1,7 @@
 # Infrastructure locale de la plateforme MLOps.
 # Démarrage : docker compose up -d   (nécessite un fichier .env, voir .env.example)
+# Tous les ports sont publiés sur 127.0.0.1 uniquement : Redis, MLflow et Prefect n'ont pas
+# d'authentification et ne doivent pas être joignables depuis le réseau local.
 
 x-restart: &restart
   restart: unless-stopped
@@ -12,7 +14,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
-    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    ports: ["127.0.0.1:${POSTGRES_PORT:-5432}:5432"]
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./docker/postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
@@ -46,7 +48,7 @@ services:
       --workers 2
       --uvicorn-opts "--timeout-keep-alive 120"
       --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
-    ports: ["5000:5000"]
+    ports: ["127.0.0.1:5000:5000"]
     volumes: [mlflow_artifacts:/mlartifacts]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
@@ -68,7 +70,7 @@ services:
       PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
       PREFECT_UI_API_URL: http://localhost:4200/api
       PREFECT_SERVER_API_HOST: 0.0.0.0
-    ports: ["4200:4200"]
+    ports: ["127.0.0.1:4200:4200"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
       interval: 10s
@@ -82,7 +84,7 @@ services:
     <<: *restart
     image: redis:7.4-alpine
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -168,11 +170,15 @@ services:
       # reports/loadtests/RESULTS.md). Le cache LRU local par worker reste actif.
       CACHE_ENABLED: ${CACHE_ENABLED:-false}
       LOCAL_CACHE_SIZE: ${LOCAL_CACHE_SIZE:-50000}
+      # Jeton exigé par /admin/reload (vide = endpoint désactivé).
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Snapshot servi épinglé (rejeu / démo J+1) ; vide = dernier snapshot validé.
+      SERVE_SNAPSHOT_SHA: ${SERVE_SNAPSHOT_SHA:-}
       MODEL_REFRESH_S: "30"
       PROMETHEUS_MULTIPROC_DIR: /tmp/prom
       # Une seule thread OpenMP par worker (voir model_store._predict_array).
       OMP_NUM_THREADS: "1"
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     volumes:
       - ./data:/app/data:ro
     healthcheck:
@@ -195,7 +201,7 @@ services:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prom_data:/prometheus
-    ports: ["9090:9090"]
+    ports: ["127.0.0.1:9090:9090"]
     deploy:
       resources:
         limits: {memory: 256m}
@@ -218,7 +224,7 @@ services:
       - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     deploy:
       resources:
         limits: {memory: 256m}

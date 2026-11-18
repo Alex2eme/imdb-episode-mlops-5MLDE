@@ -274,7 +274,7 @@ def api_dashboard() -> dict:
     L.add(
         stat(
             "Modèle servi",
-            [prom("count by (version) (model_info)", "v{{version}}")],
+            [prom("count by (version) (model_info == 1)", "v{{version}}")],
             text_mode="name",
             desc="Alias champion du registre MLflow chargé par l'API",
         ),
