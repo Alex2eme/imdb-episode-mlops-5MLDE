@@ -183,6 +183,35 @@ d'exploitation autant que le résultat.
 | La CI ne construisait pas l'image Docker | Ajout d'un job : validation de `docker compose config`, `docker build`, tests de fumée dans l'image |
 | `boto3` inutile (reliquat de MinIO) et code mort | Supprimés |
 
+### Répétition du guide de démonstration sur un clone vierge (18/11)
+
+Rejouée depuis `git clone` du dépôt public, dans un projet Compose séparé aux volumes vides.
+Les 11 scénarios de [DEMO.md](DEMO.md) ont abouti :
+- construction des images en 4 min 40, démarrage en 3 min ;
+- 1er modèle avec une RMSE de 0,567 ;
+- lot invalide rejeté sans relance ;
+- MLflow arrêté puis reprise à la 3e tentative ;
+- Redis contourné ;
+- rollback à chaud et reproduction à l'identique (écart 0,0) ;
+- J+1 : 425 prédictions et RMSE live 0,576 ;
+- charge : 210 req/s sans échec ;
+- 69 tests passent.
+
+Écarts trouvés et corrigés :
+
+| Écart | Correction |
+|---|---|
+| Le banc de charge relevait le CPU de `projet-api-1`, un nom propre au poste de développement : relevé vide dans un clone | Conteneur résolu par `docker compose ps -q api` |
+| `curl` sous Git Bash Windows n'encode pas les accents en UTF-8 : corps refusé, et l'erreur sortait au format brut de FastAPI | Exemple sans accent dans le guide ; toutes les erreurs HTTP (route inconnue, corps illisible) passent au format unique |
+| `docker compose logs -f \| grep -m1` ne rend la main qu'à la ligne de log suivante (4 min observées) | Boucle d'attente `until … grep -q` |
+| Durées et nombre de contrôles annoncés inexacts (19/19 au lieu de 18/18 pour un 1er snapshot ; entraînement de 12 min 45 au lieu de 5) | Guide corrigé |
+| Le 2e appel identique n'était pas toujours servi par le cache | Comportement normal (cache par worker) ; guide précisé |
+
+Reste non observé en conditions réelles : la reprise automatique d'un commit validé sans
+modèle et le lancement de la chaîne par `watch-source` via le déploiement. Aucun nouveau commit
+source n'est arrivé pendant la répétition ; ces deux chemins sont couverts par des tests
+unitaires.
+
 ---
 
 ## 6. Limites connues et pistes

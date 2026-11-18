@@ -100,9 +100,13 @@ class StatsSampler(threading.Thread):
         self._halt = threading.Event()
 
     def run(self):
+        # Le nom du conteneur dépend du nom du projet Compose (le dossier du clone) :
+        # on le résout par Compose au lieu de supposer « projet-api-1 ».
+        container = sh(["docker", "compose", "ps", "-q", "api"], check=False, capture=True)
+        container = container.strip().splitlines()[0] if container.strip() else "api"
         while not self._halt.is_set():
             out = sh(
-                ["docker", "stats", "--no-stream", "--format", "{{json .}}", "projet-api-1"],
+                ["docker", "stats", "--no-stream", "--format", "{{json .}}", container],
                 check=False,
                 capture=True,
             )

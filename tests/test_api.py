@@ -294,3 +294,15 @@ def test_check_features_rejects_incompatible_model():
     check_features({"features": ",".join(FEATURES)})
     with pytest.raises(ModelUnavailableError):
         check_features({"features": ",".join(reversed(FEATURES))})
+
+
+def test_framework_errors_use_unified_format(make_client):
+    client, _ = make_client()
+    r = client.get("/inexistant")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not_found" and r.json()["request_id"]
+    r = client.post(
+        "/predict", content=b"{pas du json", headers={"Content-Type": "application/json"}
+    )
+    assert r.status_code in (400, 422)
+    assert "error" in r.json() and "request_id" in r.json()

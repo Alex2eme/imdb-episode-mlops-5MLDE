@@ -141,10 +141,10 @@ complets, avec ce qu'on doit observer, sont dans [docs/DEMO.md](docs/DEMO.md).
 ```bash
 cp .env.example .env                        # puis remplacer les mots de passe « change-me »
 export GIT_SHA=$(git rev-parse HEAD)        # version du code intégrée à l'image
-docker compose --profile jobs build         # image applicative (environ 10 min la 1re fois)
+docker compose --profile jobs build         # images (environ 5 min la 1re fois)
 docker compose up -d --wait                 # 8 services
 R="docker compose run --rm pipeline python -m imdb_mlops"
-$R data && $R train                         # 1er snapshot, 1er modèle (environ 6 min)
+$R data && $R train                         # 1er snapshot, 1er modèle (6 à 14 min)
 curl -s localhost:8000/predict -H 'Content-Type: application/json' \
   -d '{"series_id": "tt0903747", "season": 5, "episode": 16}'
 ```

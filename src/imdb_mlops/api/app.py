@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from sqlalchemy import select
 from starlette.datastructures import MutableHeaders
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from imdb_mlops import __version__, db
 from imdb_mlops.api import telemetry
@@ -218,6 +219,16 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 @app.exception_handler(ModelUnavailableError)
 async def model_unavailable_handler(request: Request, exc: ModelUnavailableError):
     return _error(request, 503, "model_unavailable", f"Modèle indisponible : {exc}")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException):
+    """Erreurs HTTP du framework (route inconnue, méthode, corps illisible) : même format
+    que les erreurs métier, avec request_id."""
+    codes = {400: "bad_request", 404: "not_found", 405: "method_not_allowed"}
+    return _error(
+        request, exc.status_code, codes.get(exc.status_code, "http_error"), str(exc.detail)
+    )
 
 
 @app.exception_handler(Exception)

@@ -4,7 +4,8 @@ Ce guide permet de rejouer le **fonctionnement nominal** et les **incidents cont
 bout en bout, depuis un clone du dépôt. Les commandes sont écrites pour bash (Linux, macOS,
 Git Bash sous Windows) et se lancent depuis la racine du dépôt.
 
-Durée totale : environ 45 minutes, dont environ 15 de construction et de premier entraînement.
+Durée totale : environ 1 h, dont 20 à 25 min de construction, de démarrage et de premier
+entraînement (mesuré lors d'une répétition complète sur un clone vierge, le 18/11).
 
 | Interface | URL | Ce qu'on y regarde |
 |---|---|---|
@@ -34,8 +35,8 @@ Prérequis : Docker (avec Compose v2), Git. Prévoir environ 4 Go de RAM pour Do
 git clone <url-du-depot> imdb-mlops && cd imdb-mlops
 cp .env.example .env            # puis remplacer les mots de passe « change-me »
 export GIT_SHA=$(git rev-parse HEAD)
-docker compose --profile jobs build        # image applicative (environ 10 min la 1re fois)
-docker compose up -d --wait                # 8 services
+docker compose --profile jobs build        # images (environ 5 min la 1re fois)
+docker compose up -d --wait                # 8 services (environ 3 min)
 docker compose ps                          # tous « healthy » ou « running »
 ```
 
@@ -46,12 +47,12 @@ voulu : elle n'échoue pas, elle attend.
 
 ```bash
 $R data          # ingestion du dernier commit source + contrôles qualité (environ 1 min)
-$R train         # entraînement avec 30 trials Optuna en parallèle + décision (environ 5 min)
+$R train         # 30 trials Optuna en parallèle + décision (5 à 13 min selon la machine)
 $R models        # registre : la version 1 porte l'alias « champion »
 ```
 
 Ce qu'on observe :
-- **Terminal** : `19/19 contrôles OK`, puis `PROMU : Aucun champion : RMSE 0.57…`.
+- **Terminal** : `18/18 contrôles OK` (19/19 à partir du 2e snapshot, qui ajoute la comparaison au snapshot précédent), puis `PROMU : Aucun champion : RMSE 0.57…`.
 - **MLflow, expérience `imdb-episode-rating`** : un run avec 30 runs enfants (un par trial) ;
   - tags `data.sha`, `code.git_sha` et `seed` ;
   - artefacts `plots/` (importance des features, prédit vs réel, résidus, historique Optuna),
@@ -85,7 +86,8 @@ est **non promue** : son gain est inférieur au seuil de 0,005.
 
 ```bash
 J='-H Content-Type:application/json'
-# Breaking Bad S5E16 (note IMDb réelle : 9,9) ; 2e appel servi par le cache local
+# Breaking Bad S5E16 (note IMDb réelle : 9,9). Le cache est local à chaque worker : avec
+# 2 workers, "cached": true apparaît dès que la requête retombe sur un worker qui l'a déjà vue
 curl -s $J localhost:8000/predict -d '{"series_id":"tt0903747","season":5,"episode":16}'
 curl -s $J localhost:8000/predict -d '{"series_id":"tt0903747","season":5,"episode":16}'
 # Épisode futur
@@ -96,7 +98,8 @@ curl -s $J localhost:8000/predict/batch -d '{"items":[{"series_id":"tt0944947","
 curl -s $J localhost:8000/predict -d '{"series_id":"breaking-bad","season":-1,"episode":1}'
 curl -s $J localhost:8000/predict -d '{"series_id":"tt0000000","season":1,"episode":1}'
 # Feedback (remplacer par un prediction_id renvoyé ci-dessus)
-curl -s $J localhost:8000/feedback -d '{"prediction_id":"<id>","rating":9.9,"comment":"démo"}'
+# (commentaire sans accent : sous Git Bash Windows, curl n'encode pas les arguments en UTF-8)
+curl -s $J localhost:8000/feedback -d '{"prediction_id":"<id>","rating":9.9,"comment":"demo"}'
 ```
 
 Chaque réponse porte `model_version`, ainsi que les en-têtes `X-Model-Version` et
@@ -136,8 +139,8 @@ Autres défauts disponibles : `duplicates`, `missing_column`, `null_keys`.
 ```bash
 docker compose stop mlflow
 docker compose exec worker prefect deployment run daily-pipeline/daily-pipeline -p n_trials=2 &
-# attendre « Échec train-and-promote (MlflowException) → relance » :
-docker compose logs -f worker | grep --line-buffered -m1 "relance"
+# attendre « Échec train-and-promote (MlflowException) → relance » (environ 1 min) :
+until docker compose logs --since 3m worker | grep -q "relance"; do sleep 5; done
 docker compose start mlflow                 # pendant le délai de relance (60 s)
 wait
 ```
@@ -161,6 +164,8 @@ for e in 1 2 3; do curl -s -o /dev/null -w "HTTP %{http_code} en %{time_total}s\
   -H Content-Type:application/json localhost:8000/predict \
   -d "{\"series_id\":\"tt0108778\",\"season\":4,\"episode\":$e}"; done
 curl -s localhost:8000/ready        # "cache":"down" : service dégradé mais disponible
+# (la toute 1re requête après l'arrêt peut prendre ~1 s, le temps que la sonde de 2 s
+#  détecte la panne ; les suivantes contournent Redis)
 docker compose start redis          # réactivation automatique en quelques secondes
 docker compose up -d --wait api     # retour à la configuration par défaut
 ```
