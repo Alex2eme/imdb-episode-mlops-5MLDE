@@ -104,12 +104,20 @@ def test_scenario_waits_for_running_pipeline_and_reports_queue(monkeypatch):
     from imdb_mlops.demo_console import scenarios
 
     monkeypatch.setattr(scenarios.time, "sleep", lambda s: None)
-    active = iter([["lush-buffalo"], ["lush-buffalo"], []])
-    states = iter(["SCHEDULED", "SCHEDULED", "RUNNING", "FAILED"])
+    boom = RuntimeError("500")
+    active = iter([["lush-buffalo"], ["lush-buffalo"], boom, []])
+    states = iter(["SCHEDULED", boom, "SCHEDULED", "RUNNING", "FAILED"])
     logs = []
+
+    def take(it):
+        v = next(it)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
     prefect = SimpleNamespace(
-        active_runs=lambda: next(active),
-        states=lambda run_id: (next(states), {}),
+        active_runs=lambda: take(active),
+        states=lambda run_id: (take(states), {}),
     )
     ctx = SimpleNamespace(log=logs.append, prefect=prefect)
 
@@ -117,4 +125,5 @@ def test_scenario_waits_for_running_pipeline_and_reports_queue(monkeypatch):
     assert scenarios._wait_flow(ctx, "x", timeout_s=60) == "FAILED"
     text = "\n".join(logs)
     assert "déjà en cours" in text and "lush-buffalo" in text
+    assert "momentanément indisponible" in text
     assert "file d'attente" in text and "flow → RUNNING" in text and "flow → FAILED" in text

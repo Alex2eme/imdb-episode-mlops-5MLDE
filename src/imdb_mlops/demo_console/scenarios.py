@@ -85,6 +85,22 @@ class Prefect:
 
 
 QUEUE_MAX_S = 45 * 60
+MAX_API_ERRORS = 20
+
+
+def _poll(ctx, fn, errors: list[int]):
+    """Appelle l'API Prefect en tolérant ses erreurs passagères (constaté le 19/11 : réponses
+    500 du serveur quand un entraînement sature le processeur). Retourne None en cas d'erreur."""
+    try:
+        value = fn()
+    except Exception as exc:
+        errors[0] += 1
+        if errors[0] >= MAX_API_ERRORS:
+            raise
+        ctx.log(f"API Prefect momentanément indisponible ({type(exc).__name__}), nouvel essai")
+        return None
+    errors[0] = 0
+    return value
 
 
 def _wait_pipeline_free(ctx, max_wait_s: float = QUEUE_MAX_S) -> None:
@@ -104,9 +120,10 @@ def _wait_pipeline_free(ctx, max_wait_s: float = QUEUE_MAX_S) -> None:
         "(probablement un entraînement réel déclenché par un nouveau commit du dépôt source)."
     )
     deadline = time.monotonic() + max_wait_s
+    errors = [0]
     while time.monotonic() < deadline:
         time.sleep(10)
-        if not ctx.prefect.active_runs():
+        if _poll(ctx, ctx.prefect.active_runs, errors) == []:
             ctx.log("Exécution précédente terminée : lancement du scénario")
             return
     raise TimeoutError(f"daily-pipeline toujours occupé après {max_wait_s / 60:.0f} min")
@@ -122,9 +139,14 @@ def _wait_flow(ctx, run_id: str, timeout_s: float, until_task_state: str | None 
     seen: dict[str, str] = {}
     queue_deadline = time.monotonic() + QUEUE_MAX_S
     deadline = None
+    errors = [0]
     flow_state = last_flow_state = "PENDING"
     while time.monotonic() < (deadline or queue_deadline):
-        flow_state, tasks = ctx.prefect.states(run_id)
+        polled = _poll(ctx, lambda: ctx.prefect.states(run_id), errors)
+        if polled is None:
+            time.sleep(4)
+            continue
+        flow_state, tasks = polled
         if flow_state != last_flow_state:
             if flow_state == "SCHEDULED":
                 ctx.log("Prefect · flow en file d'attente (une autre exécution occupe la place)")
