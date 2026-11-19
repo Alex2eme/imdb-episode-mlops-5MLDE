@@ -229,6 +229,31 @@ services:
       resources:
         limits: {memory: 256m}
 
+  # ⚠ PRÉSENTATION UNIQUEMENT : console web de démonstration des incidents contrôlés.
+  # Elle pilote Docker (arrêt/démarrage de mlflow, redis, api) via le socket : ne jamais
+  # l'exposer ni la déployer en production. Démarrée seulement avec le profil « demo » :
+  #   docker compose --profile demo up -d demo-console   → http://localhost:8080
+  demo-console:
+    build: *app-build
+    image: imdb-mlops/app:latest
+    profiles: ["demo"]
+    command: uvicorn imdb_mlops.demo_console.app:app --host 0.0.0.0 --port 8080 --no-access-log
+    depends_on:
+      postgres: {condition: service_healthy}
+      prefect-server: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      API_URL: http://api:8000
+      PROMETHEUS_URL: http://prometheus:9090
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+    volumes:
+      - ./data:/app/data:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports: ["127.0.0.1:8080:8080"]
+    deploy:
+      resources:
+        limits: {memory: 512m, cpus: "1"}
+
 volumes:
   pg_data:
   prom_data:

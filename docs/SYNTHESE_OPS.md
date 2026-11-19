@@ -212,6 +212,25 @@ modèle et le lancement de la chaîne par `watch-source` via le déploiement. Au
 source n'est arrivé pendant la répétition ; ces deux chemins sont couverts par des tests
 unitaires.
 
+### Console de démonstration et incident découvert en l'utilisant (19/11)
+
+Une console web (`demo-console`, profil `demo`, **présentation uniquement**) lance d'un clic les
+incidents contrôlés. Ses 7 scénarios ont été exécutés sur la plateforme réelle :
+- lot invalide : 16 854 doublons détectés, flow `Failed`, 2 alertes ;
+- Redis arrêté : 10/10 prédictions en 200 ;
+- rollback aller-retour ;
+- API arrêtée : `ApiDown` passe de `pending` à `firing` en 55 s ;
+- MLflow rétabli pendant la relance : flow `Completed` ;
+- **MLflow durablement indisponible** : 3 tentatives, flow `Failed`, alerte critique. C'est la
+  première observation réelle de ce scénario.
+
+Deux constats faits en l'utilisant :
+
+| Constat | Diagnostic | Correction |
+|---|---|---|
+| Une tâche d'entraînement « bloquée » 1 h 38 | Aucun relevé Prometheus entre 11:01 et 12:35, aucun log PostgreSQL : **la machine était en veille**. À la sortie de veille, la relance a fonctionné | Aucune (environnement) |
+| `watch-source` ne s'exécutait plus depuis le 18/11 16:15 (« *scheduled runs skipped (at capacity)* ») | Un run resté « Running » depuis le **16/11** (worker interrompu par le redémarrage de la machine) occupait la limite de concurrence du déploiement ; 13 exécutions planifiées en retard | Au démarrage du worker, seul exécutant, les runs Running/Pending sont marqués `Crashed` et les exécutions en retard annulées ; surveillance rétablie et vérifiée |
+
 ---
 
 ## 6. Limites connues et pistes

@@ -83,3 +83,24 @@ def test_invalid_batch_stops_before_training(prefect_api, monkeypatch):
 )
 def test_already_processed(snapshot, trained, expected):
     assert flows.already_processed(snapshot, trained) is expected
+
+
+def test_plan_recovery_marks_orphans_and_late_runs():
+    from datetime import UTC, datetime, timedelta
+
+    from imdb_mlops.orchestration.recovery import plan_recovery
+
+    now = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
+
+    def run(state, minutes_ago):
+        st = SimpleNamespace(type=SimpleNamespace(value=state))
+        return SimpleNamespace(state=st, expected_start_time=now - timedelta(minutes=minutes_ago))
+
+    zombie, pending = run("RUNNING", 3 * 24 * 60), run("PENDING", 60)
+    late, soon = run("SCHEDULED", 60), run("SCHEDULED", -20)
+    queued = run("SCHEDULED", 2)  # en attente de place depuis peu : conservé
+    orphans, to_cancel = plan_recovery(
+        [zombie, pending, late, soon, queued], now, timedelta(minutes=10)
+    )
+    assert orphans == [zombie, pending]
+    assert to_cancel == [late]

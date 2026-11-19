@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console de démonstration</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --line: #dde1e8;
+    --accent: #2f5bd3; --accent-text: #ffffff; --ok: #1f8a4c; --ko: #c23b3b; --run: #b7791f;
+    --warn-bg: #fff4d6; --warn-line: #e0b34a; --warn-text: #5c4300; --code: #f0f2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #9aa3b2; --line: #2c323d;
+      --accent: #6d8cff; --accent-text: #0d1020; --ok: #4cc283; --ko: #ff6b6b; --run: #f0b54a;
+      --warn-bg: #3a2f12; --warn-line: #8a6a1f; --warn-text: #ffe1a1; --code: #232833;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+  .warning { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-text);
+             border-radius: 10px; padding: 14px 16px; margin-bottom: 20px; }
+  .warning strong { display: block; font-size: 16px; margin-bottom: 4px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  .status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
+  .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px;
+          padding: 4px 12px; font-size: 13px; }
+  .chip.ok { border-color: var(--ok); color: var(--ok); }
+  .chip.ko { border-color: var(--ko); color: var(--ko); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 420px); gap: 20px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .card h2 { font-size: 16px; margin: 0; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card .expected { color: var(--text); }
+  .meta { font-size: 12px; color: var(--muted); }
+  .links a { font-size: 13px; color: var(--accent); margin-right: 10px; white-space: nowrap; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: auto; }
+  select { flex: 1; min-width: 0; padding: 6px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--text); }
+  button { border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; cursor: pointer;
+           background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+           position: sticky; top: 16px; align-self: start; }
+  .panel h2 { font-size: 16px; margin: 0 0 8px; }
+  .state { font-weight: 600; }
+  .state.running { color: var(--run); } .state.succeeded { color: var(--ok); }
+  .state.failed { color: var(--ko); }
+  .log { background: var(--code); border-radius: 8px; padding: 10px; height: 360px; overflow: auto;
+         font: 12.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap;
+         overflow-wrap: anywhere; }
+  .log .t { color: var(--muted); }
+  .result { margin: 10px 0 0; font-weight: 600; }
+  .history { margin-top: 14px; font-size: 13px; }
+  .history div { padding: 4px 0; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="warning" role="alert">
+    <strong>⚠ Fonctionnalité réservée à la présentation du projet</strong>
+    Cette console sert uniquement à démontrer les incidents contrôlés lors de la soutenance.
+    Elle arrête et redémarre des conteneurs (MLflow, Redis, API) et modifie le registre de
+    modèles. Elle n'est pas une fonctionnalité du produit et ne doit jamais être déployée en
+    production : elle n'est lancée qu'avec le profil Compose <code>demo</code>, sur la machine
+    locale (127.0.0.1).
+  </div>
+
+  <h1>Console de démonstration — incidents contrôlés</h1>
+  <p class="sub">Un scénario à la fois. Chaque service arrêté est redémarré automatiquement à la
+    fin du scénario, y compris en cas d'erreur. Le détail des scénarios est dans <code>docs/DEMO.md</code>.</p>
+
+  <div class="status" id="status">
+    <span class="chip">Chargement de l'état des services…</span>
+  </div>
+
+  <div class="layout">
+    <div class="cards" id="cards"></div>
+    <aside class="panel">
+      <h2>Exécution</h2>
+      <div id="job-title" class="meta">Aucun scénario lancé.</div>
+      <div id="job-state" class="state"></div>
+      <div class="log" id="log" aria-live="polite"></div>
+      <p class="result" id="result"></p>
+      <div class="row" style="margin-top:10px">
+        <button class="secondary" id="restore" title="Redémarre MLflow, Redis et l'API s'ils sont arrêtés">Rétablir les services</button>
+      </div>
+      <div class="history" id="history"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const host = location.hostname || "localhost";
+let currentJob = null, pollTimer = null, running = false;
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function link(path) { return `http://${host}${path}`; }
+
+async function loadScenarios() {
+  const list = await (await fetch("/api/scenarios")).json();
+  document.getElementById("cards").innerHTML = list.map(s => {
+    const select = Object.entries(s.params).map(([k, values]) =>
+      `<select data-param="${k}" aria-label="${k}">${values.map(v => `<option>${esc(v)}</option>`).join("")}</select>`).join("");
+    const links = s.look_at.map(([label, path]) => `<a href="${link(path)}" target="_blank" rel="noopener">${esc(label)} ↗</a>`).join("");
+    return `<div class="card" data-key="${s.key}">
+      <h2>${esc(s.title)}</h2>
+      <p>${esc(s.summary)}</p>
+      <p class="expected"><strong>Attendu :</strong> ${esc(s.expected)}</p>
+      <div class="links">${links}</div>
+      <div class="meta">Durée ${esc(s.duration)}</div>
+      <div class="row">${select}<button data-run="${s.key}">Lancer</button></div>
+    </div>`;
+  }).join("");
+  document.querySelectorAll("[data-run]").forEach(b => b.addEventListener("click", () => run(b.dataset.run)));
+  setRunning(running);
+}
+
+function setRunning(value) {
+  running = value;
+  document.querySelectorAll("[data-run]").forEach(b => b.disabled = value);
+}
+
+async function run(key) {
+  const card = document.querySelector(`.card[data-key="${key}"]`);
+  const params = {};
+  card.querySelectorAll("[data-param]").forEach(s => params[s.dataset.param] = s.value);
+  const r = await fetch(`/api/scenarios/${key}/run`, {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({params})});
+  const body = await r.json();
+  if (!r.ok) { alert(body.detail || "Lancement refusé"); return; }
+  follow(body.job_id);
+}
+
+function follow(jobId) {
+  currentJob = jobId;
+  setRunning(true);
+  clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 2000);
+  poll();
+}
+
+async function poll() {
+  if (!currentJob) return;
+  const r = await fetch(`/api/jobs/${currentJob}`);
+  if (!r.ok) return;
+  const job = await r.json();
+  document.getElementById("job-title").textContent = `${job.title} — démarré ${new Date(job.started_at).toLocaleTimeString()}`;
+  const st = document.getElementById("job-state");
+  st.textContent = {running: "En cours…", succeeded: "Terminé", failed: "Échec du scénario"}[job.status];
+  st.className = `state ${job.status}`;
+  const logEl = document.getElementById("log");
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+  logEl.innerHTML = job.logs.map(l => `<span class="t">${new Date(l.t).toLocaleTimeString()}</span>  ${esc(l.msg)}`).join("\n");
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  document.getElementById("result").textContent = job.result ? `→ ${job.result}` : "";
+  if (job.status !== "running") { clearInterval(pollTimer); setRunning(false); loadStatus(); }
+}
+
+async function loadStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    document.getElementById("status").innerHTML = Object.entries(s.services).map(([name, state]) => {
+      const cls = state.startsWith("running") && !state.includes("unhealthy") ? "ok" : "ko";
+      return `<span class="chip ${cls}">${esc(name)} : ${esc(state)}</span>`;
+    }).join("");
+    document.getElementById("history").innerHTML = s.history.length
+      ? "<strong>Historique</strong>" + s.history.map(h => `<div>${new Date(h.started_at).toLocaleTimeString()} · ${esc(h.title)} · <span class="state ${h.status}">${h.status}</span>${h.result ? " — " + esc(h.result) : ""}</div>`).join("")
+      : "";
+    if (s.current && !currentJob) {
+      const cur = s.history.find(h => h.id === s.current);
+      if (cur && cur.status === "running") follow(s.current);
+    }
+  } catch (e) { /* console injoignable : on réessaie au prochain tour */ }
+}
+
+document.getElementById("restore").addEventListener("click", async () => {
+  const r = await (await fetch("/api/restore", {method: "POST"})).json();
+  alert(Object.entries(r).map(([k, v]) => `${k} : ${v}`).join("\n"));
+  loadStatus();
+});
+
+loadScenarios();
+loadStatus();
+setInterval(loadStatus, 5000);
+</script>
+</body>
+</html>

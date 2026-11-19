@@ -13,6 +13,7 @@ from prefect import serve
 
 from imdb_mlops import db
 from imdb_mlops.orchestration.flows import daily_pipeline, watch_source
+from imdb_mlops.orchestration.recovery import recover_orphan_runs
 
 WATCH_INTERVAL_S = int(os.environ.get("WATCH_INTERVAL_S", "1800"))
 
@@ -23,6 +24,11 @@ def main() -> None:
         db.init_db()
     except Exception as exc:
         logging.warning("Base indisponible au démarrage (%s) : tables créées plus tard", exc)
+    try:
+        # Runs restés « Running » après un arrêt brutal : ils bloqueraient la concurrence.
+        logging.info("Nettoyage des runs orphelins : %s", recover_orphan_runs())
+    except Exception as exc:
+        logging.warning("Nettoyage des runs orphelins impossible : %s", exc)
 
     watch = watch_source.to_deployment(
         name="watch-source",

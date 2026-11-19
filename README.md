@@ -533,6 +533,42 @@ p95 ≤ 300 ms ; on n'exploite que 70 % de la capacité mesurée.
     cause puisse être établie, car les journaux ont été effacés par les redéploiements ;
   - à re-mesurer sur l'infrastructure cible avant une mise en production.
 
+## Console de démonstration (présentation uniquement)
+
+> ⚠ **Fonctionnalité réservée à la présentation du projet.** Elle ne fait pas partie du
+> produit et ne doit jamais être déployée en production. Pour pouvoir arrêter et redémarrer
+> des conteneurs, elle reçoit le socket Docker, ce qui lui donne de fait le contrôle de
+> l'hôte. Elle n'est démarrée qu'avec le profil Compose `demo` et n'écoute que sur
+> `127.0.0.1`.
+
+```bash
+docker compose --profile demo up -d demo-console     # http://localhost:8080
+docker compose --profile demo stop demo-console      # à arrêter après la présentation
+```
+
+Une page web ([demo_console/](src/imdb_mlops/demo_console/)) lance d'un clic les incidents
+contrôlés de [docs/DEMO.md](docs/DEMO.md). Pour chacun, elle affiche le déroulé en direct
+(états Prefect, contrôles bloquants, alertes émises) et des liens vers l'interface où
+constater l'effet.
+
+| Scénario | Ce qu'il fait | Résultat attendu |
+|---|---|---|
+| Lot de données invalide | défaut injecté (choix parmi 5), puis chaîne complète | ingestion en échec, aucune relance, aucun entraînement, 2 alertes critiques |
+| MLflow indisponible, puis rétabli | arrêt de MLflow, chaîne lancée, redémarrage pendant le délai de relance | `AwaitingRetry`, puis succès |
+| MLflow durablement indisponible | MLflow arrêté pendant tout le flow | 3 tentatives, flow `Failed`, alerte critique |
+| Redis indisponible | arrêt de Redis et 10 prédictions | toutes en 200 (Redis n'est pas critique) |
+| API arrêtée | arrêt de l'API jusqu'à l'alerte | alerte Prometheus `ApiDown` déclenchée, puis API rétablie |
+| Rollback à chaud | `previous_champion` remis en service, API rechargée | autre version servie sans redémarrage (relancer pour revenir) |
+| Trafic simulé | 300 requêtes réalistes | dashboards alimentés |
+
+Garde-fous :
+- un seul scénario à la fois ;
+- seuls `mlflow`, `redis` et `api` peuvent être arrêtés, et uniquement dans le projet Compose
+  courant ;
+- chaque service arrêté est redémarré à la fin du scénario, même en cas d'erreur ;
+- un bouton « Rétablir les services » permet de tout relancer en cas de besoin ;
+- les paramètres sont validés contre une liste fermée.
+
 ## Qualité et tests
 
 ```bash

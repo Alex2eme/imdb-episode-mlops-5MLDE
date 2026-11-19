@@ -238,6 +238,24 @@ docker compose run --rm pipeline ruff check .
 docker compose run --rm pipeline pytest            # unitaires + intégration (infra démarrée)
 ```
 
+## 12. Console de démonstration (présentation uniquement)
+
+Les scénarios 4 à 7 peuvent aussi se lancer d'un clic, sans terminal, depuis une page web.
+**Cette console ne sert qu'à la présentation du projet** et ne doit jamais être déployée en
+production : elle pilote Docker via son socket.
+
+```bash
+docker compose --profile demo up -d demo-console     # puis ouvrir http://localhost:8080
+```
+
+Pendant la soutenance : ouvrir la console d'un côté et l'interface indiquée sur chaque carte
+(Prefect, Grafana, Prometheus, MLflow) de l'autre, puis cliquer sur « Lancer ». Le journal
+de la console affiche les changements d'état au fur et à mesure. Après la présentation :
+
+```bash
+docker compose --profile demo stop demo-console
+```
+
 ## Arrêt
 
 ```bash
