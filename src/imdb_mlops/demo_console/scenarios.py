@@ -58,17 +58,81 @@ class Prefect:
         flow_state = fr.state.type.value if fr.state else "PENDING"
         return flow_state, {t.name: t.state.name for t in tasks if t.state}
 
+    def active_runs(self) -> list[str]:
+        """Runs daily-pipeline en cours (la limite de concurrence du déploiement est 1)."""
+        from prefect.client.orchestration import get_client
+        from prefect.client.schemas.filters import (
+            DeploymentFilter,
+            DeploymentFilterId,
+            FlowRunFilter,
+            FlowRunFilterState,
+            FlowRunFilterStateType,
+        )
+        from prefect.client.schemas.objects import StateType
+
+        with get_client(sync_client=True) as client:
+            dep = client.read_deployment_by_name(DAILY)
+            runs = client.read_flow_runs(
+                deployment_filter=DeploymentFilter(id=DeploymentFilterId(any_=[dep.id])),
+                flow_run_filter=FlowRunFilter(
+                    state=FlowRunFilterState(
+                        type=FlowRunFilterStateType(any_=[StateType.RUNNING, StateType.PENDING])
+                    )
+                ),
+                limit=10,
+            )
+        return [f"{r.name} (paramètres {r.parameters or '{}'})" for r in runs]
+
+
+QUEUE_MAX_S = 45 * 60
+
+
+def _wait_pipeline_free(ctx, max_wait_s: float = QUEUE_MAX_S) -> None:
+    """Attend qu'aucun daily-pipeline ne tourne avant de lancer un scénario.
+
+    Le déploiement n'accepte qu'une exécution à la fois : un scénario lancé pendant un
+    entraînement réel (déclenché par watch-source sur un nouveau commit) resterait en file
+    d'attente sans rien afficher, et un scénario qui arrête MLflow casserait cet entraînement.
+    """
+    active = ctx.prefect.active_runs()
+    if not active:
+        return
+    ctx.log(
+        "Une exécution de daily-pipeline est déjà en cours : "
+        + ", ".join(active)
+        + ". Le déploiement n'en accepte qu'une à la fois : le scénario attend sa fin "
+        "(probablement un entraînement réel déclenché par un nouveau commit du dépôt source)."
+    )
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        time.sleep(10)
+        if not ctx.prefect.active_runs():
+            ctx.log("Exécution précédente terminée : lancement du scénario")
+            return
+    raise TimeoutError(f"daily-pipeline toujours occupé après {max_wait_s / 60:.0f} min")
+
 
 def _wait_flow(ctx, run_id: str, timeout_s: float, until_task_state: str | None = None):
     """Suit un run Prefect en journalisant chaque changement d'état.
 
+    Le délai `timeout_s` ne court qu'une fois le run démarré : l'attente en file (limite de
+    concurrence) est journalisée et bornée séparément par QUEUE_MAX_S.
     Retourne l'état final du flow, ou `until_task_state` dès qu'une tâche l'atteint.
     """
     seen: dict[str, str] = {}
-    deadline = time.monotonic() + timeout_s
-    flow_state = "PENDING"
-    while time.monotonic() < deadline:
+    queue_deadline = time.monotonic() + QUEUE_MAX_S
+    deadline = None
+    flow_state = last_flow_state = "PENDING"
+    while time.monotonic() < (deadline or queue_deadline):
         flow_state, tasks = ctx.prefect.states(run_id)
+        if flow_state != last_flow_state:
+            if flow_state == "SCHEDULED":
+                ctx.log("Prefect · flow en file d'attente (une autre exécution occupe la place)")
+            elif flow_state not in FINAL_STATES:
+                ctx.log(f"Prefect · flow → {flow_state}")
+            last_flow_state = flow_state
+        if deadline is None and flow_state not in {"SCHEDULED", "PENDING"}:
+            deadline = time.monotonic() + timeout_s
         for name, state in tasks.items():
             if seen.get(name) != state:
                 ctx.log(f"Prefect · tâche {name.rsplit('-', 1)[0]} → {state}")
@@ -79,8 +143,8 @@ def _wait_flow(ctx, run_id: str, timeout_s: float, until_task_state: str | None 
             ctx.log(f"Prefect · flow → {flow_state}")
             return flow_state
         time.sleep(4)
-    ctx.log(f"Délai dépassé ({timeout_s:.0f} s), dernier état du flow : {flow_state}")
-    return flow_state
+    # Un scénario non terminé n'est pas un succès : le job passe en échec dans la console.
+    raise TimeoutError(f"délai dépassé, dernier état du flow : {flow_state}")
 
 
 def _alerts_since(ctx, since: datetime) -> None:
@@ -113,6 +177,7 @@ def _ready(ctx) -> dict:
 def invalid_batch(ctx, fault: str = "ratings_out_of_range") -> str:
     if fault not in FAULTS:
         raise ValueError(f"Défaut inconnu : {fault}")
+    _wait_pipeline_free(ctx)
     since = datetime.now(UTC)
     ctx.log(f"Lancement de daily-pipeline avec le défaut « {fault} » : {FAULTS[fault]}")
     run_id = ctx.prefect.start({"fault": fault})
@@ -133,6 +198,7 @@ def invalid_batch(ctx, fault: str = "ratings_out_of_range") -> str:
 
 
 def mlflow_recovery(ctx) -> str:
+    _wait_pipeline_free(ctx)  # ne pas casser un entraînement réel en cours
     since = datetime.now(UTC)
     try:
         ctx.log("Arrêt de MLflow")
@@ -152,6 +218,7 @@ def mlflow_recovery(ctx) -> str:
 
 
 def mlflow_durable(ctx) -> str:
+    _wait_pipeline_free(ctx)  # ne pas casser un entraînement réel en cours
     since = datetime.now(UTC)
     try:
         ctx.log("Arrêt de MLflow pour toute la durée du flow")

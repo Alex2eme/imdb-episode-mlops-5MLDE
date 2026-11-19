@@ -241,6 +241,13 @@ def watch_source(n_trials: int | None = None) -> dict:
     if already_processed(known, db.model_trained_on(sha)):
         logger.info("Commit %s déjà traité (%s) : rien à faire", sha[:10], known["quality_status"])
         return {"sha": sha, "triggered": False}
+    busy = active_pipeline_runs()
+    if busy:
+        # Constaté le 19/11 : pendant l'entraînement du nouveau commit, le snapshot est déjà
+        # validé mais le modèle pas encore enregistré ; sans ce contrôle, la sentinelle
+        # suivante prenait ce cas pour un échec à reprendre et relançait un doublon.
+        logger.info("daily-pipeline déjà en cours (%s) : rien à lancer", ", ".join(busy))
+        return {"sha": sha, "triggered": False, "busy": busy}
     reason = "nouveau commit" if known is None else "snapshot validé sans modèle : reprise"
     logger.info("Commit source %s (%s) → déclenchement de la chaîne", sha[:10], reason)
     send_alert(
@@ -255,6 +262,61 @@ def watch_source(n_trials: int | None = None) -> dict:
     run = run_deployment(
         "daily-pipeline/daily-pipeline",
         parameters={"ref": sha, "n_trials": n_trials},
-        timeout=None,
+        timeout=0,
     )
-    return {"sha": sha, "triggered": True, "flow_run": str(run.id), "state": run.state_name}
+    state = wait_flow_run(run.id)
+    return {"sha": sha, "triggered": True, "flow_run": str(run.id), "state": state}
+
+
+def active_pipeline_runs() -> list[str]:
+    """Noms des runs daily-pipeline en cours ou en attente d'exécution."""
+    from prefect.client.orchestration import get_client
+    from prefect.client.schemas.filters import (
+        DeploymentFilter,
+        DeploymentFilterId,
+        FlowRunFilter,
+        FlowRunFilterState,
+        FlowRunFilterStateType,
+    )
+    from prefect.client.schemas.objects import StateType
+
+    with get_client(sync_client=True) as client:
+        dep = client.read_deployment_by_name("daily-pipeline/daily-pipeline")
+        runs = client.read_flow_runs(
+            deployment_filter=DeploymentFilter(id=DeploymentFilterId(any_=[dep.id])),
+            flow_run_filter=FlowRunFilter(
+                state=FlowRunFilterState(
+                    type=FlowRunFilterStateType(any_=[StateType.RUNNING, StateType.PENDING])
+                )
+            ),
+            limit=10,
+        )
+    return [r.name for r in runs]
+
+
+def wait_flow_run(flow_run_id, poll_s: float = 15, max_errors: int = 40) -> str:
+    """Attend la fin d'un run en tolérant les erreurs passagères de l'API Prefect.
+
+    Constaté le 19/11 : pendant un entraînement (CPU saturé), le serveur Prefect a répondu
+    une fois 500 (timeout interne) ; `run_deployment(timeout=None)` propageait l'erreur et
+    watch-source passait en échec alors que l'entraînement lancé continuait normalement.
+    """
+    import time
+
+    from prefect.client.orchestration import get_client
+
+    logger = get_run_logger()
+    errors = 0
+    while True:
+        try:
+            with get_client(sync_client=True) as client:
+                fr = client.read_flow_run(flow_run_id)
+            errors = 0
+            if fr.state and fr.state.is_final():
+                return fr.state.name
+        except Exception as exc:
+            errors += 1
+            if errors >= max_errors:
+                raise
+            logger.warning("API Prefect indisponible (%s), nouvel essai (%d)", exc, errors)
+        time.sleep(poll_s)

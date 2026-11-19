@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -96,3 +97,24 @@ def test_one_scenario_at_a_time_and_service_restarted(client, monkeypatch):
     assert job["status"] == "failed"
     assert any("panne simulée" in line["msg"] for line in job["logs"])
     assert ("POST", "/containers/id-redis/start") in calls  # redémarré malgré l'erreur
+
+
+def test_scenario_waits_for_running_pipeline_and_reports_queue(monkeypatch):
+    """Un scénario lancé pendant un entraînement réel attend et le dit (constaté le 19/11)."""
+    from imdb_mlops.demo_console import scenarios
+
+    monkeypatch.setattr(scenarios.time, "sleep", lambda s: None)
+    active = iter([["lush-buffalo"], ["lush-buffalo"], []])
+    states = iter(["SCHEDULED", "SCHEDULED", "RUNNING", "FAILED"])
+    logs = []
+    prefect = SimpleNamespace(
+        active_runs=lambda: next(active),
+        states=lambda run_id: (next(states), {}),
+    )
+    ctx = SimpleNamespace(log=logs.append, prefect=prefect)
+
+    scenarios._wait_pipeline_free(ctx)
+    assert scenarios._wait_flow(ctx, "x", timeout_s=60) == "FAILED"
+    text = "\n".join(logs)
+    assert "déjà en cours" in text and "lush-buffalo" in text
+    assert "file d'attente" in text and "flow → RUNNING" in text and "flow → FAILED" in text

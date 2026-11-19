@@ -231,6 +231,15 @@ Deux constats faits en l'utilisant :
 | Une tâche d'entraînement « bloquée » 1 h 38 | Aucun relevé Prometheus entre 11:01 et 12:35, aucun log PostgreSQL : **la machine était en veille**. À la sortie de veille, la relance a fonctionné | Aucune (environnement) |
 | `watch-source` ne s'exécutait plus depuis le 18/11 16:15 (« *scheduled runs skipped (at capacity)* ») | Un run resté « Running » depuis le **16/11** (worker interrompu par le redémarrage de la machine) occupait la limite de concurrence du déploiement ; 13 exécutions planifiées en retard | Au démarrage du worker, seul exécutant, les runs Running/Pending sont marqués `Crashed` et les exécutions en retard annulées ; surveillance rétablie et vérifiée |
 
+Trois autres constats le même jour, quand le commit source du 19/11 (`9799ccdde3`) est arrivé
+pendant une démonstration :
+
+| Constat | Diagnostic | Correction |
+|---|---|---|
+| Le scénario « lot invalide » semblait bloqué, puis s'est affiché « réussi » avec l'état `SCHEDULED` | Lancé 70 s après le début de l'entraînement réel du nouveau commit, il attendait en file (concurrence 1), sans que la console l'affiche ; le délai de 10 min courait pendant cette attente | La console détecte un `daily-pipeline` en cours, l'écrit dans le journal et attend sa fin avant de lancer le scénario. Cela évite aussi qu'un scénario arrête MLflow pendant un vrai entraînement. Le délai ne court qu'une fois le run démarré, et un dépassement passe le scénario en échec |
+| `watch-source` en échec, avec une alerte critique, alors que l'entraînement qu'il avait lancé s'est terminé normalement | Processeur saturé par l'entraînement : le serveur Prefect a répondu une fois `500` (timeout interne), et `run_deployment(timeout=None)` a propagé cette erreur | Attente du run enfant tolérante aux erreurs passagères de l'API (jusqu'à 40 essais consécutifs, toutes les 15 s) |
+| Un 2ᵉ entraînement du même commit a été lancé | La sentinelle de 14:56 a vu le snapshot validé sans modèle encore enregistré (l'entraînement se terminait 30 s plus tard), et a pris ce cas pour un échec à reprendre | `watch-source` ne lance rien tant qu'un `daily-pipeline` est en cours |
+
 ---
 
 ## 6. Limites connues et pistes

@@ -104,3 +104,44 @@ def test_plan_recovery_marks_orphans_and_late_runs():
     )
     assert orphans == [zombie, pending]
     assert to_cancel == [late]
+
+
+def test_wait_flow_run_tolerates_transient_api_errors(monkeypatch):
+    """Une erreur 500 passagère du serveur Prefect ne fait plus échouer watch-source."""
+    import contextlib
+    import logging
+
+    import prefect.client.orchestration as orch
+
+    answers = iter([RuntimeError("500"), SimpleNamespace(state=None), RuntimeError("500"), "done"])
+
+    class Client:
+        def read_flow_run(self, _id):
+            a = next(answers)
+            if isinstance(a, Exception):
+                raise a
+            if a == "done":
+                return SimpleNamespace(
+                    state=SimpleNamespace(is_final=lambda: True, name="Completed")
+                )
+            return a
+
+    monkeypatch.setattr(orch, "get_client", lambda sync_client: contextlib.nullcontext(Client()))
+    monkeypatch.setattr(flows, "get_run_logger", lambda: logging.getLogger("t"))
+    assert flows.wait_flow_run("x", poll_s=0) == "Completed"
+
+
+def test_watch_source_does_not_relaunch_while_pipeline_runs(monkeypatch):
+    """Snapshot validé, modèle pas encore enregistré, entraînement en cours : pas de doublon."""
+    import logging
+
+    launched = []
+    monkeypatch.setattr(flows, "resolve_source_commit", lambda: "a" * 40)
+    monkeypatch.setattr(flows.db, "get_snapshot", lambda sha: {"quality_status": "passed"})
+    monkeypatch.setattr(flows.db, "model_trained_on", lambda sha: False)
+    monkeypatch.setattr(flows, "active_pipeline_runs", lambda: ["lush-buffalo"])
+    monkeypatch.setattr(flows, "get_run_logger", lambda: logging.getLogger("t"))
+    monkeypatch.setattr(flows, "send_alert", lambda *a, **k: launched.append(a))
+    out = flows.watch_source.fn()
+    assert out["triggered"] is False and out["busy"] == ["lush-buffalo"]
+    assert launched == []

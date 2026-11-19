@@ -562,7 +562,7 @@ constater l'effet.
 | Trafic simulé | 300 requêtes réalistes | dashboards alimentés |
 
 Garde-fous :
-- un seul scénario à la fois ;
+- un seul scénario à la fois ; si un `daily-pipeline` réel est déjà en cours (par exemple l'entraînement d'un nouveau commit source), le scénario l'indique dans le journal et attend sa fin ;
 - seuls `mlflow`, `redis` et `api` peuvent être arrêtés, et uniquement dans le projet Compose
   courant ;
 - chaque service arrêté est redémarré à la fin du scénario, même en cas d'erreur ;
