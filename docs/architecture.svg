@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="800" height="800" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Architecture du projet IMDb MLOps</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/>
+    </marker>
+    <style>
+      .t  { font-size: 15px; font-weight: 700; fill: #111827; text-anchor: middle; }
+      .s  { font-size: 12.5px; fill: #374151; text-anchor: middle; }
+      .l  { font-size: 11.5px; fill: #374151; font-style: italic;
+            paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+      .a  { stroke: #4b5563; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .ad { stroke: #c0504d; stroke-width: 1.8; fill: none; marker-end: url(#arrow); stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <rect width="800" height="800" fill="#ffffff"/>
+  <text x="400" y="30" class="t" style="font-size:17px">Architecture — IMDb Episode Rating MLOps</text>
+
+  <!-- Rangée 1 : déclenchement -->
+  <rect x="30" y="50" width="210" height="110" rx="10" fill="#ffffff" stroke="#6b7280" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="135" y="88" class="t">Dépôt GitHub source</text>
+  <text x="135" y="110" class="s">ya0903/imdb-episode-dataset</text>
+  <text x="135" y="128" class="s">mis à jour chaque jour</text>
+
+  <rect x="295" y="50" width="210" height="110" rx="10" fill="#e8f0fe" stroke="#3b6fd8" stroke-width="1.5"/>
+  <text x="400" y="80" class="t">Orchestration</text>
+  <text x="400" y="99" class="s">Prefect · :4200</text>
+  <text x="400" y="120" class="s">watch-source (30 min)</text>
+  <text x="400" y="138" class="s">daily-pipeline</text>
+
+  <rect x="560" y="50" width="210" height="110" rx="10" fill="#ffffff" stroke="#6b7280" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="665" y="88" class="t">Clients</text>
+  <text x="665" y="110" class="s">/predict · /predict/batch</text>
+  <text x="665" y="128" class="s">/feedback</text>
+
+  <!-- Rangée 2 : traitement et service -->
+  <rect x="30" y="245" width="210" height="120" rx="10" fill="#e8f0fe" stroke="#3b6fd8" stroke-width="1.5"/>
+  <text x="135" y="280" class="t">Ingestion + qualité</text>
+  <text x="135" y="302" class="s">archive au commit (SHA)</text>
+  <text x="135" y="320" class="s">→ Parquet</text>
+  <text x="135" y="338" class="s">Great Expectations</text>
+
+  <rect x="295" y="245" width="210" height="120" rx="10" fill="#f1e9fd" stroke="#7a4bd1" stroke-width="1.5"/>
+  <text x="400" y="280" class="t">Entraînement</text>
+  <text x="400" y="302" class="s">LightGBM + Optuna</text>
+  <text x="400" y="320" class="s">règle de promotion</text>
+  <text x="400" y="338" class="s">évaluation J+1</text>
+
+  <rect x="560" y="245" width="210" height="120" rx="10" fill="#e6f5ec" stroke="#2e8b57" stroke-width="1.5"/>
+  <text x="665" y="280" class="t">API FastAPI · :8000</text>
+  <text x="665" y="302" class="s">uvicorn multi-workers</text>
+  <text x="665" y="320" class="s">cache LRU (+ Redis)</text>
+  <text x="665" y="338" class="s">modèle rechargé à chaud</text>
+
+  <!-- Rangée 3 : résultats -->
+  <rect x="30" y="445" width="210" height="110" rx="10" fill="#fdeeee" stroke="#c0504d" stroke-width="1.5"/>
+  <text x="135" y="480" class="t">Arrêt + alerte</text>
+  <text x="135" y="502" class="s">alerte critique</text>
+  <text x="135" y="520" class="s">webhook Discord / Slack</text>
+
+  <rect x="295" y="445" width="210" height="110" rx="10" fill="#f1e9fd" stroke="#7a4bd1" stroke-width="1.5"/>
+  <text x="400" y="480" class="t">MLflow · :5000</text>
+  <text x="400" y="502" class="s">runs, métriques, artefacts</text>
+  <text x="400" y="520" class="s">registre : alias champion</text>
+
+  <rect x="560" y="445" width="210" height="110" rx="10" fill="#fff4e0" stroke="#d08a1e" stroke-width="1.5"/>
+  <text x="665" y="480" class="t">Supervision</text>
+  <text x="665" y="502" class="s">Prometheus · :9090</text>
+  <text x="665" y="520" class="s">Grafana · :3000</text>
+
+  <!-- Rangée 4 : stockage -->
+  <rect x="30" y="640" width="740" height="110" rx="10" fill="#eef0f3" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="400" y="680" class="t">PostgreSQL</text>
+  <text x="400" y="704" class="s">snapshots et contrôles · étapes du pipeline · décisions du registre · alertes</text>
+  <text x="400" y="724" class="s">prédictions, feedbacks et évaluation J+1 · métadonnées MLflow et Prefect</text>
+
+  <!-- Flèches -->
+  <line x1="240" y1="105" x2="293" y2="105" class="a"/>
+  <text x="267" y="96" class="l" text-anchor="middle">surveille</text>
+
+  <line x1="135" y1="160" x2="135" y2="243" class="a"/>
+  <text x="143" y="206" class="l">archive au SHA</text>
+
+  <line x1="400" y1="160" x2="236" y2="246" class="a"/>
+  <text x="330" y="214" class="l" text-anchor="start">lance la chaîne</text>
+
+  <line x1="240" y1="305" x2="293" y2="305" class="a"/>
+  <text x="267" y="296" class="l" text-anchor="middle">conforme</text>
+
+  <line x1="135" y1="365" x2="135" y2="443" class="ad"/>
+  <text x="143" y="408" class="l" fill="#c0504d">non conforme</text>
+
+  <line x1="400" y1="365" x2="400" y2="443" class="a"/>
+  <text x="392" y="408" class="l" text-anchor="end">modèle</text>
+
+  <line x1="505" y1="460" x2="575" y2="367" class="a"/>
+  <text x="520" y="408" class="l" text-anchor="start">champion</text>
+
+  <line x1="665" y1="160" x2="665" y2="243" class="a"/>
+  <text x="673" y="206" class="l">requêtes</text>
+
+  <line x1="665" y1="365" x2="665" y2="443" class="a"/>
+  <text x="673" y="408" class="l">métriques</text>
+
+  <line x1="135" y1="555" x2="135" y2="638" class="a"/>
+  <line x1="400" y1="555" x2="400" y2="638" class="a"/>
+  <line x1="665" y1="638" x2="665" y2="557" class="a"/>
+  <text x="673" y="600" class="l">Grafana lit</text>
+  <text x="408" y="600" class="l">métadonnées</text>
+  <text x="143" y="600" class="l">alertes</text>
+</svg>

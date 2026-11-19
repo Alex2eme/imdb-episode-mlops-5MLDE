@@ -4,15 +4,14 @@ Projet : prédire la note IMDb d'un épisode de série et industrialiser la cha�
 l'ingestion des données à la supervision du service. Le modèle est volontairement simple
 (LightGBM sur l'historique de la série). Ce document justifie les choix techniques, rassemble
 les **preuves d'intégration** observées, les résultats des tests de charge, le dimensionnement
-recommandé et les limites connues.
+recommandé et les problèmes rencontrés pendant la construction.
 
 Sommaire :
 1. [Décisions techniques](#1-décisions-techniques)
 2. [Preuves d'intégration](#2-preuves-dintégration-observées-sur-la-plateforme-réelle)
 3. [Résultats du modèle](#3-résultats-du-modèle)
 4. [Tests de charge et dimensionnement](#4-tests-de-charge-et-dimensionnement)
-5. [Incidents rencontrés pendant la construction](#5-incidents-rencontrés-pendant-la-construction-et-corrections)
-6. [Limites connues et pistes](#6-limites-connues-et-pistes)
+5. [Problèmes rencontrés](#5-problèmes-rencontrés)
 
 ---
 
@@ -95,6 +94,8 @@ visible dans au moins une interface. Le [guide de démonstration](DEMO.md) perme
 | 9 | **Comparaison J+1** (snapshots réels du 14/11 et du 15/11) | 425 prédictions évaluées, RMSE live 0,578 ; nouveaux épisodes 0,722, épisodes connus 0,453 | Grafana « Performance en production », MLflow `…-production` |
 | 10 | Validation des entrées et erreurs de l'API | 422 (détail par champ), 404 `unknown_series`, lot partiellement réussi (200 avec liste d'erreurs) | `api_requests`, Grafana |
 | 11 | Charge : plus de 140 000 requêtes en campagne | **0 échec**, jusqu'à 245 req/s (2 workers) | `reports/loadtests/RESULTS.md`, Grafana « API » |
+| 12 | **Nouveau commit source du 19/11** (`9799ccdde3`) traité seul | Détecté par `watch-source` à 14:26 et lancé via le déploiement `daily-pipeline` : contrôles OK (421 483 épisodes, 15 s), 510 prédictions de la veille évaluées (RMSE live 0,563), entraînement de la v9 (30 min) **rejetée** (0,5695 contre 0,5700, gain < 0,005) | Prefect, Grafana « Traitements », MLflow |
+| 13 | **Console de démonstration** : les 7 scénarios lancés depuis la page web | Lot invalide rejeté (doublons, colonne manquante), MLflow rétabli (`Completed`) ou durablement absent (3 tentatives, `Failed`, alerte critique), Redis contourné (10/10 en 200), `ApiDown` en `firing` en 55 s, rollback aller-retour v1 → v2 → v1, 300 requêtes simulées | Console, Prefect, Prometheus, Grafana |
 
 ---
 
@@ -121,7 +122,7 @@ visible dans au moins une interface. Le [guide de démonstration](DEMO.md) perme
 ## 4. Tests de charge et dimensionnement
 
 Détail complet : [reports/loadtests/RESULTS.md](../reports/loadtests/RESULTS.md) et la section
-« Tests de charge » du [README](../README.md#tests-de-charge-et-dimensionnement).
+« Tests de charge » de la [documentation technique](DOCUMENTATION_TECHNIQUE.md#tests-de-charge-et-dimensionnement).
 
 **Avant / après** :
 
@@ -147,129 +148,38 @@ fois une prédiction ramenée à 1,5 ms. Le cache LRU local par worker est conse
 
 ---
 
-## 5. Incidents rencontrés pendant la construction et corrections
+## 5. Problèmes rencontrés
 
-Ces incidents ont été diagnostiqués par la mesure, puis corrigés. Ils documentent la démarche
-d'exploitation autant que le résultat.
+Chaque problème a été diagnostiqué par la mesure ou par les journaux, puis corrigé. Les
+derniers ont été trouvés en relisant le code (18/11), en rejouant la démonstration sur un clone
+vierge (18/11) et en utilisant la console de démonstration (19/11).
 
-| Symptôme | Diagnostic | Correction |
+| Problème | Cause | Solution |
 |---|---|---|
-| DLL scipy/pyarrow bloquées sous Windows | Smart App Control bloque, de façon non déterministe, les binaires non signés | Exécution des traitements et des tests dans l'image Linux |
-| Images MinIO introuvables | Images communautaires retirées des registres publics | Artefacts servis par MLflow (volume) |
+| DLL scipy/pyarrow bloquées sous Windows | Smart App Control bloque, de façon non déterministe, les binaires non signés | Traitements et tests exécutés dans l'image Linux |
+| Images MinIO introuvables | Images communautaires retirées des registres publics | Artefacts servis par MLflow sur un volume |
 | MLflow redémarre en boucle | Workers de jobs GenAI : 768 Mo saturés | Jobs désactivés (environ 570 Mo) |
-| `Connection reset` vers MLflow pendant le tuning | Tuning sur 12 cœurs : serveur affamé ; keep-alive uvicorn de 5 s | Pipeline limité à 10 CPU, keep-alive de 120 s, relances du traçage |
-| Expectation GX en échec sans détail | `column_list` en tuple non supporté ; exception imbriquée par GX | Liste ; extraction de l'exception imbriquée dans le rapport |
-| Règle de promotion faussée | Version MLflow renvoyée en `int` ou en `str` selon le backend | Normalisation en `str` (détectée par les tests de bout en bout) |
-| Table `model_events` absente | Schéma créé seulement par l'étape données | `init_db` idempotent au démarrage de chaque commande |
-| Requêtes bloquées 4 à 30 s, Redis arrêté | Résolution DNS d'un conteneur arrêté, non couverte par les timeouts | Sonde de fond et coupe-circuit : aucune requête n'attend |
-| 2 ou 4 workers sans effet ; logs d'accès présents | Commande YAML repliée : options uvicorn ignorées | Commande en forme liste ; vérification des processus |
-| Pics p99 de 5 s, conteneur bridé | 12 threads OpenMP LightGBM pour 1 à 2 CPU de quota | `num_threads=1`, `OMP_NUM_THREADS=1` |
-| Workers « died » sous charge | Healthcheck des workers uvicorn (5 s) dépassé sous saturation | `--timeout-worker-healthcheck 30` |
-| 503 au démarrage à 4 workers | Indexation pandas de 56 s par worker et téléchargements simultanés | Indexation vectorisée (2,2 s) et tentatives de chargement |
-| Plafond de 110 req/s quelle que soit l'API | Générateur Locust saturé (1 processus, `requests`) | `FastHttpUser` et 4 processus |
-| Évaluation J+1 du 17/11 sur 436 231 prédictions | Les 458 566 prédictions des tests de charge étaient traitées comme du trafic de production et noyaient les métriques live | Origine du trafic tracée (`X-Traffic-Source` : `user`, `simulation`, `loadtest`), trafic de charge exclu de l'évaluation, historique étiqueté d'après les fenêtres horaires et évaluations polluées supprimées |
-
-### Relecture du code (18/11) : constats corrigés
-
-| Constat | Correction |
-|---|---|
-| Après un rollback, Grafana affichait deux versions « servies » : `Gauge.clear()` n'est pas pris en charge par Prometheus en mode multi-processus | L'ancienne version est remise à 0 et les requêtes filtrent `model_info == 1` |
-| Un commit dont l'entraînement avait échoué après ses relances était considéré comme traité, donc jamais réentraîné | Un commit n'est traité que si ses données sont rejetées ou si un modèle a été enregistré dessus |
-| `watch-source` lançait la chaîne en sous-flow, donc hors de la limite de concurrence : deux entraînements pouvaient tourner en même temps | Lancement via le déploiement `daily-pipeline` (`run_deployment`), soumis à sa limite de 1 |
-| Le « dernier snapshot » était choisi par date de validation : ré-ingérer un ancien commit faisait servir de vieilles données | Tri par date des données (commit source) ; épinglage explicite avec `SERVE_SNAPSHOT_SHA` |
-| À l'arrêt de l'API, seul un lot de traces était écrit, et le reste était perdu sans être compté | La file est vidée entièrement et tout reliquat est compté dans `db_traces_dropped_total` |
-| Ports publiés sur toutes les interfaces, Redis sans mot de passe ; `/admin/reload` ouvert | Publication sur `127.0.0.1` uniquement ; jeton `X-Admin-Token` exigé |
-| Une version entraînée avec d'autres features pouvait être chargée sans contrôle | Comparaison avec le tag `features` de la version : chargement refusé et modèle précédent conservé |
-| La CI ne construisait pas l'image Docker | Ajout d'un job : validation de `docker compose config`, `docker build`, tests de fumée dans l'image |
-| `boto3` inutile (reliquat de MinIO) et code mort | Supprimés |
-
-### Répétition du guide de démonstration sur un clone vierge (18/11)
-
-Rejouée depuis `git clone` du dépôt public, dans un projet Compose séparé aux volumes vides.
-Les 11 scénarios de [DEMO.md](DEMO.md) ont abouti :
-- construction des images en 4 min 40, démarrage en 3 min ;
-- 1er modèle avec une RMSE de 0,567 ;
-- lot invalide rejeté sans relance ;
-- MLflow arrêté puis reprise à la 3e tentative ;
-- Redis contourné ;
-- rollback à chaud et reproduction à l'identique (écart 0,0) ;
-- J+1 : 425 prédictions et RMSE live 0,576 ;
-- charge : 210 req/s sans échec ;
-- 69 tests passent.
-
-Écarts trouvés et corrigés :
-
-| Écart | Correction |
-|---|---|
-| Le banc de charge relevait le CPU de `projet-api-1`, un nom propre au poste de développement : relevé vide dans un clone | Conteneur résolu par `docker compose ps -q api` |
-| `curl` sous Git Bash Windows n'encode pas les accents en UTF-8 : corps refusé, et l'erreur sortait au format brut de FastAPI | Exemple sans accent dans le guide ; toutes les erreurs HTTP (route inconnue, corps illisible) passent au format unique |
-| `docker compose logs -f \| grep -m1` ne rend la main qu'à la ligne de log suivante (4 min observées) | Boucle d'attente `until … grep -q` |
-| Durées et nombre de contrôles annoncés inexacts (19/19 au lieu de 18/18 pour un 1er snapshot ; entraînement de 12 min 45 au lieu de 5) | Guide corrigé |
-| Le 2e appel identique n'était pas toujours servi par le cache | Comportement normal (cache par worker) ; guide précisé |
-
-Reste non observé en conditions réelles : la reprise automatique d'un commit validé sans
-modèle et le lancement de la chaîne par `watch-source` via le déploiement. Aucun nouveau commit
-source n'est arrivé pendant la répétition ; ces deux chemins sont couverts par des tests
-unitaires.
-
-### Console de démonstration et incident découvert en l'utilisant (19/11)
-
-Une console web (`demo-console`, profil `demo`, **présentation uniquement**) lance d'un clic les
-incidents contrôlés. Ses 7 scénarios ont été exécutés sur la plateforme réelle :
-- lot invalide : 16 854 doublons détectés, flow `Failed`, 2 alertes ;
-- Redis arrêté : 10/10 prédictions en 200 ;
-- rollback aller-retour ;
-- API arrêtée : `ApiDown` passe de `pending` à `firing` en 55 s ;
-- MLflow rétabli pendant la relance : flow `Completed` ;
-- **MLflow durablement indisponible** : 3 tentatives, flow `Failed`, alerte critique. C'est la
-  première observation réelle de ce scénario.
-
-Deux constats faits en l'utilisant :
-
-| Constat | Diagnostic | Correction |
-|---|---|---|
-| Une tâche d'entraînement « bloquée » 1 h 38 | Aucun relevé Prometheus entre 11:01 et 12:35, aucun log PostgreSQL : **la machine était en veille**. À la sortie de veille, la relance a fonctionné | Aucune (environnement) |
-| `watch-source` ne s'exécutait plus depuis le 18/11 16:15 (« *scheduled runs skipped (at capacity)* ») | Un run resté « Running » depuis le **16/11** (worker interrompu par le redémarrage de la machine) occupait la limite de concurrence du déploiement ; 13 exécutions planifiées en retard | Au démarrage du worker, seul exécutant, les runs Running/Pending sont marqués `Crashed` et les exécutions en retard annulées ; surveillance rétablie et vérifiée |
-
-Trois autres constats le même jour, quand le commit source du 19/11 (`9799ccdde3`) est arrivé
-pendant une démonstration :
-
-| Constat | Diagnostic | Correction |
-|---|---|---|
-| Le scénario « lot invalide » semblait bloqué, puis s'est affiché « réussi » avec l'état `SCHEDULED` | Lancé 70 s après le début de l'entraînement réel du nouveau commit, il attendait en file (concurrence 1), sans que la console l'affiche ; le délai de 10 min courait pendant cette attente | La console détecte un `daily-pipeline` en cours, l'écrit dans le journal et attend sa fin avant de lancer le scénario. Cela évite aussi qu'un scénario arrête MLflow pendant un vrai entraînement. Le délai ne court qu'une fois le run démarré, et un dépassement passe le scénario en échec |
-| `watch-source` en échec, avec une alerte critique, alors que l'entraînement qu'il avait lancé s'est terminé normalement | Processeur saturé par l'entraînement : le serveur Prefect a répondu une fois `500` (timeout interne), et `run_deployment(timeout=None)` a propagé cette erreur | Attente du run enfant tolérante aux erreurs passagères de l'API (jusqu'à 40 essais consécutifs, toutes les 15 s) |
-| Un 2ᵉ entraînement du même commit a été lancé | La sentinelle de 14:56 a vu le snapshot validé sans modèle encore enregistré (l'entraînement se terminait 30 s plus tard), et a pris ce cas pour un échec à reprendre | `watch-source` ne lance rien tant qu'un `daily-pipeline` est en cours |
-
----
-
-## 6. Limites connues et pistes
-
-- **Mesures de charge sur un poste unique** (Docker Desktop/WSL2) : le générateur et l'API
-  partagent les ressources, un aller-retour réseau coûte 1 à 3 ms, et la variabilité d'un run à
-  l'autre atteint ±30 % (atténuée par la médiane de 3 runs). À re-mesurer sur l'infrastructure
-  cible.
-- **Traces perdues pendant la campagne de charge** : environ 2 000 (≈ 0,3 %), cause non
-  établie avec certitude, car les journaux ont été effacés par les redéploiements successifs.
-  La relecture du code a trouvé une cause plausible, corrigée depuis : à l'arrêt, l'API ne
-  vidait qu'un seul lot de sa file de traces et perdait le reste sans le compter. Le compteur
-  `db_traces_dropped_total` et l'alerte `TracesDropped` permettent de les détecter.
-- **Origine du trafic déclarative** : un client qui omet `X-Traffic-Source` compte comme un
-  utilisateur réel. En production, il faudrait réserver la valeur `loadtest` à des clients
-  authentifiés.
-- **Snapshots manqués quand la machine est éteinte** : `watch-source` ne traite que le dernier
-  commit. Le snapshot du 16/11 n'a pas été ingéré. Piste : rattraper les commits intermédiaires
-  via l'API GitHub.
-- **Séries entrées dans le top 10 000 le jour J** : inconnues de l'API jusqu'au snapshot suivant
-  (404). Piste : un modèle de repli sans historique.
-- **Nouveaux épisodes sous-estimés** (biais −0,07, RMSE 0,72) : piste, une feature d'âge de
-  l'épisode, ou ne prédire qu'une fois un nombre minimal de votes atteint.
-- **Alertes** : envoyées par webhook (Discord/Slack) si `ALERT_WEBHOOK_URL` est configuré, et
-  toujours en base et dans les logs. Les règles Prometheus ne sont pas reliées à Alertmanager,
-  elles sont seulement visibles dans Prometheus et Grafana.
-- **Sécurité** : les ports sont publiés sur `127.0.0.1` uniquement et `/admin/reload` exige un
-  jeton. L'API de prédiction, MLflow et Prefect restent sans authentification, ce qui n'est
-  acceptable qu'en local. Il faudrait un reverse proxy avec authentification et TLS avant
-  toute exposition.
-- **Tests du flow Prefect** : le serveur de test embarqué de Prefect 3.8 est incompatible avec
-  la version de FastAPI du projet. Le test d'orchestration s'exécute donc contre le vrai serveur
-  (test d'intégration).
+| `Connection reset` vers MLflow pendant le tuning | Serveur affamé par un tuning sur 12 cœurs ; keep-alive uvicorn de 5 s | Pipeline limité à 10 CPU, keep-alive de 120 s, relances du traçage |
+| Expectation GX en échec sans détail | `column_list` en tuple non supporté ; exception imbriquée par GX | Liste ; exception imbriquée extraite dans le rapport |
+| Règle de promotion faussée | Version MLflow renvoyée en `int` ou en `str` selon le backend | Normalisation en `str` |
+| Requêtes bloquées 4 à 30 s quand Redis est arrêté | Résolution DNS d'un conteneur arrêté, non couverte par les timeouts | Sonde de fond et coupe-circuit : aucune requête n'attend |
+| 2 ou 4 workers d'API sans effet | Commande YAML repliée : options uvicorn ignorées | Commande en forme de liste |
+| Pics p99 de 5 s | 12 threads OpenMP LightGBM pour 1 à 2 CPU de quota | `num_threads=1`, `OMP_NUM_THREADS=1` |
+| Workers d'API « died » sous charge | Healthcheck des workers uvicorn (5 s) dépassé sous saturation | `--timeout-worker-healthcheck 30` |
+| 503 au démarrage à 4 workers | Indexation pandas de 56 s par worker | Indexation vectorisée (2,2 s) |
+| Plafond de 110 req/s quelle que soit l'API | Générateur Locust saturé | `FastHttpUser` et 4 processus |
+| Métriques J+1 noyées (436 231 prédictions évaluées) | Le trafic des tests de charge était traité comme du trafic de production | Origine du trafic tracée (`X-Traffic-Source`) et trafic de charge exclu |
+| Deux versions « servies » dans Grafana après un rollback | `Gauge.clear()` non pris en charge par Prometheus en multi-processus | Ancienne version remise à 0, filtre `model_info == 1` |
+| Un commit dont l'entraînement avait échoué n'était jamais réentraîné | Il était considéré comme traité dès ses données validées | Traité seulement si les données sont rejetées ou si un modèle a été enregistré |
+| Deux entraînements pouvaient tourner en même temps | `watch-source` lançait la chaîne en sous-flow, hors de la limite de concurrence | Lancement via le déploiement `daily-pipeline` (limite de 1) |
+| Ré-ingérer un ancien commit faisait servir de vieilles données | « Dernier snapshot » choisi par date de validation | Tri par date du commit source ; épinglage avec `SERVE_SNAPSHOT_SHA` |
+| Traces perdues à l'arrêt de l'API | Un seul lot de la file était écrit | File vidée entièrement, reliquat compté dans `db_traces_dropped_total` |
+| Services exposés sur le réseau, `/admin/reload` ouvert | Ports publiés sur toutes les interfaces | Ports sur `127.0.0.1` ; jeton `X-Admin-Token` |
+| Un modèle entraîné avec d'autres features pouvait être chargé | Aucun contrôle au chargement | Comparaison avec le tag `features` : chargement refusé |
+| Le banc de charge ne relevait pas le CPU dans un clone | Nom de conteneur propre au poste de développement | Conteneur résolu par `docker compose ps -q api` |
+| Requêtes avec accents refusées sous Git Bash Windows | `curl` n'y encode pas les arguments en UTF-8 | Exemples sans accent ; erreurs HTTP au format unique |
+| Une tâche d'entraînement « bloquée » 1 h 38 | La machine était en veille (aucun relevé Prometheus ni log PostgreSQL) | Aucune : la relance a fonctionné au réveil |
+| `watch-source` arrêté depuis le 18/11 (« *at capacity* ») | Un run resté « Running » depuis un redémarrage de la machine occupait la limite de concurrence | Au démarrage du worker, runs orphelins marqués `Crashed` et exécutions en retard annulées |
+| Un scénario de la console semblait bloqué, puis « réussi » à l'état `SCHEDULED` | Il attendait derrière un entraînement réel, sans que la console l'affiche | La console signale l'exécution en cours et attend sa fin ; un dépassement de délai est un échec |
+| `watch-source` en échec alors que son entraînement réussissait | Serveur Prefect saturé pendant l'entraînement : réponse `500` passagère | Attente tolérante aux erreurs passagères (`watch-source` et console) |
+| Le même commit entraîné deux fois | Pendant l'entraînement, le snapshot validé sans modèle encore enregistré était pris pour un échec à reprendre | `watch-source` ne lance rien tant qu'un `daily-pipeline` est en cours |

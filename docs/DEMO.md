@@ -7,6 +7,11 @@ Git Bash sous Windows) et se lancent depuis la racine du dépôt.
 Durée totale : environ 1 h, dont 20 à 25 min de construction, de démarrage et de premier
 entraînement (mesuré lors d'une répétition complète sur un clone vierge, le 18/11).
 
+Deux façons de jouer les incidents contrôlés :
+- **la console de démonstration** (§1), une page web qui lance chaque incident d'un clic et
+  affiche son déroulé en direct. C'est la façon conseillée pendant une présentation ;
+- **la ligne de commande** (§5 à §8), qui montre exactement ce que fait chaque incident.
+
 | Interface | URL | Ce qu'on y regarde |
 |---|---|---|
 | Grafana | http://localhost:3000 (sans compte) | Dossier « IMDb MLOps » : dashboards API, Traitements, Performance en production |
@@ -14,6 +19,7 @@ entraînement (mesuré lors d'une répétition complète sur un clone vierge, le
 | MLflow | http://localhost:5000 | Expériences, runs (paramètres, métriques, artefacts), onglet Models (alias) |
 | API | http://localhost:8000/docs | Documentation interactive, essais |
 | Prometheus | http://localhost:9090/alerts | Règles d'alerte et leur état |
+| Console de démonstration | http://localhost:8080 | Lancement des incidents contrôlés (**présentation uniquement**) |
 
 Raccourci utilisé dans ce guide :
 
@@ -43,7 +49,60 @@ docker compose ps                          # tous « healthy » ou « running »
 L'API démarre en mode dégradé (`/ready` en 503) tant qu'aucun modèle n'est en service. C'est
 voulu : elle n'échoue pas, elle attend.
 
-## 1. Nominal : données, entraînement, mise en service
+## 1. Console de démonstration (présentation uniquement)
+
+> ⚠ **Cette console ne sert qu'à la présentation du projet.** Elle ne fait pas partie du
+> produit et ne doit jamais être déployée en production : pour arrêter et redémarrer des
+> conteneurs, elle reçoit le socket Docker, ce qui lui donne le contrôle de l'hôte. Elle ne
+> démarre qu'avec le profil Compose `demo` et n'écoute que sur `127.0.0.1`. Le même
+> avertissement est affiché en permanence en haut de la page.
+
+```bash
+docker compose --profile demo up -d demo-console     # puis ouvrir http://localhost:8080
+```
+
+**La page** :
+- en haut, l'état de MLflow, Redis et de l'API (pastilles vertes ou rouges, rafraîchies toutes
+  les 5 s) ;
+- une **carte par scénario** : ce qu'il fait, le résultat attendu, sa durée, des liens vers
+  l'interface où constater l'effet et, pour le lot invalide, le choix du défaut ;
+- à droite, le **journal en direct** du scénario en cours (états Prefect, contrôles bloquants,
+  alertes émises, codes HTTP), le résultat final et l'historique des scénarios lancés ;
+- le bouton **« Rétablir les services »**, qui redémarre tout service resté arrêté.
+
+**Les scénarios** (durées observées sur la plateforme réelle, le 19/11) :
+
+| Carte | Équivalent en ligne de commande | Durée | Ce qu'on observe | Où regarder |
+|---|---|---|---|---|
+| Lot de données invalide (5 défauts au choix) | §5 | ≈ 2 min | Flow `Failed`, contrôles bloquants (par exemple « colonne `votes` absente »), aucune relance, aucun entraînement, 2 alertes critiques | Prefect, Grafana « Traitements » |
+| MLflow indisponible, puis rétabli | §6 | ≈ 4 min | Tâche `train-and-promote` en `AwaitingRetry`, MLflow redémarré, relance réussie, flow `Completed` | Prefect, MLflow |
+| MLflow durablement indisponible | §6 | ≈ 7 min | 3 tentatives, flow `Failed`, alerte critique | Prefect, Grafana « Traitements » |
+| Redis indisponible | §7 | ≈ 15 s | 10 prédictions sur 10 en 200 : l'API ne dépend pas de Redis | API, Grafana « API » |
+| API arrêtée : alerte Prometheus | — | ≈ 75 s | Alerte Prometheus `ApiDown` : `pending`, puis `firing` ; l'API redémarre | Prometheus `/alerts`, Grafana « API » |
+| Rollback à chaud | §8 | ≈ 10 s | Une autre version est servie sans redémarrage ; relancer la carte revient à la version initiale | MLflow (Models), `/model` |
+| Trafic simulé | §4 | 10 à 25 s | 300 requêtes réalistes, les dashboards se remplissent | Grafana « API » et « Performance en production » |
+
+**Déroulé conseillé** : ouvrir la console d'un côté et, de l'autre, l'interface indiquée sur
+la carte. Commencer par « Trafic simulé » pour remplir les dashboards, puis « Lot de données
+invalide », « Redis indisponible », « API arrêtée : alerte Prometheus », « Rollback à chaud » (deux fois), et
+terminer par « MLflow indisponible, puis rétabli ».
+
+**Garde-fous** :
+- un seul scénario à la fois ;
+- si un `daily-pipeline` réel tourne déjà (par exemple l'entraînement d'un nouveau commit
+  source, environ 30 min), le journal l'indique et le scénario attend sa fin. Il n'arrête
+  donc jamais MLflow pendant un vrai entraînement ;
+- seuls `mlflow`, `redis` et `api` peuvent être arrêtés, et uniquement dans ce projet Compose ;
+- chaque service arrêté est redémarré à la fin du scénario, même en cas d'erreur ;
+- les paramètres sont validés contre une liste fermée.
+
+Après la présentation :
+
+```bash
+docker compose --profile demo stop demo-console
+```
+
+## 2. Nominal : données, entraînement, mise en service
 
 ```bash
 $R data          # ingestion du dernier commit source + contrôles qualité (environ 1 min)
@@ -65,7 +124,7 @@ curl -s localhost:8000/ready
 curl -s localhost:8000/model
 ```
 
-## 2. Orchestration automatique (Prefect)
+## 3. Orchestration automatique (Prefect)
 
 Le service `worker` surveille le dépôt source toutes les 30 min (`watch-source`) et lance la
 chaîne complète à chaque nouveau commit. Pour la déclencher à la main :
@@ -82,7 +141,7 @@ Dans **Prefect**, le flow `daily-pipeline` enchaîne trois tâches : `ingest-and
 la durée et le statut des étapes et la décision du registre. En général, la nouvelle version
 est **non promue** : son gain est inférieur au seuil de 0,005.
 
-## 3. API de prédiction
+## 4. API de prédiction
 
 ```bash
 J='-H Content-Type:application/json'
@@ -110,10 +169,14 @@ connus et futurs, erreurs, lots, feedbacks) :
 docker compose run --rm pipeline python -m imdb_mlops simulate -n 500 --api-url http://api:8000
 ```
 
+Depuis la console : carte « Trafic simulé » (300 requêtes).
+
 Ensuite, dans **Grafana « API »**, on voit le débit, la latence p50/p95/p99, les erreurs 4xx,
 la version servie et le cache.
 
-## 4. Incident contrôlé n° 1 : lot de données invalide
+## 5. Incident contrôlé n° 1 : lot de données invalide
+
+Depuis la console : carte « Lot de données invalide », avec le défaut choisi dans la liste.
 
 ```bash
 $R data --fault ratings_out_of_range ; echo "code retour : $?"     # 2
@@ -134,7 +197,10 @@ Où le voir :
 
 Autres défauts disponibles : `duplicates`, `missing_column`, `null_keys`.
 
-## 5. Incident contrôlé n° 2 : dépendance indisponible (MLflow), avec reprise automatique
+## 6. Incident contrôlé n° 2 : dépendance indisponible (MLflow), avec reprise automatique
+
+Depuis la console : cartes « MLflow indisponible, puis rétabli » et « MLflow durablement
+indisponible ».
 
 ```bash
 docker compose stop mlflow
@@ -153,7 +219,11 @@ après 3 tentatives et une alerte critique part.
 Côté API, pendant la panne de MLflow, **les prédictions continuent** : le modèle est déjà en
 mémoire, seul le rechargement périodique échoue (`model_reloads_total{result="error"}`).
 
-## 6. Incident contrôlé n° 3 : cache Redis indisponible
+## 7. Incident contrôlé n° 3 : cache Redis indisponible
+
+Depuis la console : carte « Redis indisponible ». Elle arrête Redis sans changer la
+configuration de l'API : avec le cache Redis désactivé (défaut), elle montre que l'API n'en
+dépend pas ; pour voir `cache: down` dans `/ready`, activer d'abord Redis comme ci-dessous.
 
 Redis est désactivé par défaut (voir les tests de charge). Pour la démonstration, on l'active :
 
@@ -170,7 +240,9 @@ docker compose start redis          # réactivation automatique en quelques seco
 docker compose up -d --wait api     # retour à la configuration par défaut
 ```
 
-## 7. Rollback et mise en service à chaud
+## 8. Rollback et mise en service à chaud
+
+Depuis la console : carte « Rollback à chaud ».
 
 ```bash
 $R train --trials 2          # crée une nouvelle version (en général rejetée : gain < 0,005)
@@ -185,7 +257,7 @@ Chaque décision est enregistrée dans les tags de la version (MLflow), dans la 
 `model_events` (Grafana « Traitements », colonnes promoted, rejected et rollback) et dans les
 alertes.
 
-## 8. Reproduction d'un run
+## 9. Reproduction d'un run
 
 ```bash
 $R reproduce <RUN_ID>   # run_id visible dans MLflow ou dans la sortie de « train »
@@ -196,7 +268,7 @@ Le run de reproduction relit les données au même SHA, les mêmes hyperparamèt
 seed. Il est tracé dans MLflow (tag `reproduces_run`) mais **n'est pas enregistré dans le
 registre**.
 
-## 9. Comparaison J+1 (prédiction vs note réelle)
+## 10. Comparaison J+1 (prédiction vs note réelle)
 
 Rejeu avec deux snapshots réels successifs du dépôt source. Prendre deux SHA consécutifs dans
 l'historique des commits du dépôt source ; ceux d'origine du projet sont indiqués ci-dessous.
@@ -220,7 +292,7 @@ Où le voir :
   distribution des erreurs, plus grosses erreurs ;
 - **MLflow, expérience `imdb-episode-rating-production`** : métriques `live_*`.
 
-## 10. Test de charge (version courte)
+## 11. Test de charge (version courte)
 
 ```bash
 python loadtests/run_benchmarks.py --name demo --workers 2 --cpus 2 --cache false --users 20 --duration 30s
@@ -231,34 +303,17 @@ Pendant le test, le dashboard **Grafana « API »** montre le débit et la laten
 Le trafic de charge est marqué (`X-Traffic-Source: loadtest`) et **exclu du suivi en
 production**. La campagne complète (environ 45 min) se lance avec `bash loadtests/campaign.sh`.
 
-## 11. Qualité du code et tests
+## 12. Qualité du code et tests
 
 ```bash
 docker compose run --rm pipeline ruff check .
 docker compose run --rm pipeline pytest            # unitaires + intégration (infra démarrée)
 ```
 
-## 12. Console de démonstration (présentation uniquement)
-
-Les scénarios 4 à 7 peuvent aussi se lancer d'un clic, sans terminal, depuis une page web.
-**Cette console ne sert qu'à la présentation du projet** et ne doit jamais être déployée en
-production : elle pilote Docker via son socket.
-
-```bash
-docker compose --profile demo up -d demo-console     # puis ouvrir http://localhost:8080
-```
-
-Pendant la soutenance : ouvrir la console d'un côté et l'interface indiquée sur chaque carte
-(Prefect, Grafana, Prometheus, MLflow) de l'autre, puis cliquer sur « Lancer ». Le journal
-de la console affiche les changements d'état au fur et à mesure. Après la présentation :
-
-```bash
-docker compose --profile demo stop demo-console
-```
-
 ## Arrêt
 
 ```bash
+docker compose --profile demo down   # arrête aussi la console
 docker compose down          # conserve les volumes (données, runs, modèles)
 docker compose down -v       # repart de zéro (supprime aussi les volumes)
 ```
